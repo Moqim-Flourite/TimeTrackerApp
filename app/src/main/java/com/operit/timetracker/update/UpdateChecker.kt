@@ -32,6 +32,9 @@ class UpdateChecker(private val context: Context) {
         const val GITHUB_REPO = "TimeTrackerApp"
         private const val API_URL =
             "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases/latest"
+        // 国内镜像备选（如果 GitHub API 超时）
+        private const val API_URL_MIRROR =
+            "https://ghproxy.com/https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases/latest"
         private const val MAX_REDIRECTS = 5
     }
 
@@ -73,19 +76,14 @@ class UpdateChecker(private val context: Context) {
     suspend fun checkForUpdate(): Result<UpdateInfo?> = withContext(Dispatchers.IO) {
         try {
             Log.i(TAG, "检查更新: $API_URL")
-            val conn = openConnection(URL(API_URL), "GET")
-            conn.setRequestProperty("Accept", "application/vnd.github.v3+json")
-
-            val responseCode = conn.responseCode
-            if (responseCode != 200) {
-                val errorStream = conn.errorStream?.bufferedReader()?.readText() ?: ""
-                conn.disconnect()
-                Log.e(TAG, "GitHub API 返回 $responseCode: $errorStream")
-                return@withContext Result.failure(Exception("GitHub API 返回 $responseCode"))
+            
+            // 尝试主 URL，失败则用镜像
+            val body = try {
+                fetchUrl(API_URL)
+            } catch (e: Exception) {
+                Log.w(TAG, "GitHub API 主地址失败，尝试镜像: ${e.message}")
+                fetchUrl(API_URL_MIRROR)
             }
-
-            val body = conn.inputStream.bufferedReader().use(BufferedReader::readText)
-            conn.disconnect()
 
             val json = org.json.JSONObject(body)
             val tagName = json.getString("tag_name")
@@ -195,6 +193,25 @@ class UpdateChecker(private val context: Context) {
             Log.e(TAG, "下载 APK 失败", e)
             Result.failure(e)
         }
+    }
+    
+    /**
+     * 请求 URL 并返回响应体文本
+     */
+    private fun fetchUrl(urlString: String): String {
+        val conn = openConnection(URL(urlString), "GET")
+        conn.setRequestProperty("Accept", "application/vnd.github.v3+json")
+        
+        val responseCode = conn.responseCode
+        if (responseCode != 200) {
+            val errorStream = conn.errorStream?.bufferedReader()?.readText() ?: ""
+            conn.disconnect()
+            throw Exception("HTTP $responseCode: $errorStream")
+        }
+        
+        val body = conn.inputStream.bufferedReader().use(BufferedReader::readText)
+        conn.disconnect()
+        return body
     }
 
     /**

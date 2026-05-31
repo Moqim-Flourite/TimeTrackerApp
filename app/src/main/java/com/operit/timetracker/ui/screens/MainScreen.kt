@@ -92,7 +92,7 @@ fun MainScreen(viewModel: TaskViewModel, mainViewModel: MainViewModel, navContro
                                         }
                                     }.onFailure { e ->
                                         updateError = e.message
-                                        viewModel.setMessage("❌ 检查更新失败: ${e.message}")
+                                        viewModel.setMessage("网络异常，检查更新失败，稍后再试")
                                     }
                                 }
                             }
