@@ -4,7 +4,7 @@
 
     <!-- 基础权限 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
@@ -40,10 +40,16 @@
         </activity>
         
         <!-- App监控前台服务 -->
+        <!-- Android 15+ 禁止 BOOT_COMPLETED 启动 dataSync 类型前台服务 -->
+        <!-- 改用 specialUse，参考 Element/Thunderbird 等主流 app 的做法 -->
         <service
             android:name=".service.AppMonitorService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="App usage monitoring for time tracking" />
+        </service>
         
         <!-- ScreenStateReceiver: 仅通过 AppMonitorService 动态注册 -->
         <!-- Android 8+ 不向静态注册的 receiver 投递 SCREEN_ON/OFF -->
