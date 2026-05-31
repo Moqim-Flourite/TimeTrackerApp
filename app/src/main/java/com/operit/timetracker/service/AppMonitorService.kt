@@ -520,6 +520,9 @@ class AppMonitorService : Service() {
     }
     
     private fun getAppName(packageName: String): String {
+        // 空闲任务标记不是真实包名
+        if (packageName == IDLE_PACKAGE) return "空闲"
+        
         // 先检查缓存
         appNameCache[packageName]?.let { return it }
         
@@ -669,7 +672,7 @@ class AppMonitorService : Service() {
     
     private fun getCurrentForegroundApp(): String? {
         val endTime = System.currentTimeMillis()
-        val beginTime = endTime - 1000 * 60 // 扩大到60秒
+        val beginTime = endTime - 1000 * 120 // 2 分钟窗口，覆盖解锁延迟
         
         AppLogger.d("查询UsageStats: ${beginTime} ~ ${endTime}")
         
@@ -884,9 +887,10 @@ class AppMonitorService : Service() {
         if (currentTask != null && currentTask.originalInput == IDLE_PACKAGE) {
             stopCurrentTask(currentTask)
         }
-        // 立即检测前台 App
+        // 等待 500ms 让系统记录前台 App，再检测
         serviceScope.launch {
             try {
+                delay(500)
                 checkCurrentApp()
             } catch (e: Exception) {
                 AppLogger.e("解锁后检测失败", e)
