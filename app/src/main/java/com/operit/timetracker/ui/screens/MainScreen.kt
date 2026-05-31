@@ -60,6 +60,21 @@ fun MainScreen(viewModel: TaskViewModel, mainViewModel: MainViewModel, navContro
         }
     }
     
+    // 启动时自动检查更新（静默，失败不弹提示）
+    LaunchedEffect(Unit) {
+        try {
+            val result = updateChecker.checkForUpdate()
+            result.onSuccess { info ->
+                if (info != null) {
+                    updateInfo = info
+                    showUpdateDialog = true
+                }
+            }
+        } catch (_: Exception) {
+            // 静默失败
+        }
+    }
+    
     Scaffold(
         topBar = {
             TopAppBar(
