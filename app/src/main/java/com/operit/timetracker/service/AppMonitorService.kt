@@ -298,6 +298,39 @@ class AppMonitorService : Service() {
         IDLE_PACKAGE // 空闲任务标记
     )
     
+    /**
+     * 辅助应用白名单：当正在进行某活动时，打开这些应用不触发切换
+     * key = 当前任务类别, value = 允许的包名列表
+     */
+    private val assistantApps = mapOf(
+        "睡觉" to setOf(
+            "jp.pokemon.pokemonsleep", // 宝可梦睡眠
+            "com.netease.cloudmusic", // 网易云音乐
+            "com.kugou.android", // 酷狗音乐
+            "com.kuwo.player", // 酷我音乐
+            "tv.danmaku.bili", // B站（助眠音频）
+            "com.bilibili.app.in", // B站国际版
+            "com.mi.health", // 小米健康
+            "com.huawei.health" // 华为健康
+        ),
+        "学习" to setOf(
+            "com.eusoft.eudic", // 欧路词典
+            "com.eusoft.ting.en", // 每日英语听力
+            "com.duolingo", // 多邻国
+            "com.shici", // 诗词
+            "com.bf.words_recite", // 背单词
+            "cn.com.langeasy.LangEasyLexis" // 不背单词
+        ),
+        "工作" to setOf(
+            "com.tencent.androidqqmail", // QQ邮箱
+            "com.google.android.apps.docs.editors.sheets", // Google表格
+            "com.google.android.apps.docs.editors.slides", // Google幻灯片
+            "com.google.android.apps.docs.editors.docs", // Google文档
+            "cn.wps.moffice_eng.xiaomi.lite", // WPS
+            "cn.wps.note" // WPS笔记
+        )
+    )
+    
     // 当前前台应用信息
     private var currentForegroundPackage: String? = null
     private var currentForegroundAppName: String? = null
@@ -593,6 +626,12 @@ class AppMonitorService : Service() {
             
             // 如果当前没有任务，或者任务类别不同，则切换任务
             if (currentTask == null || currentTask.originalInput != currentPackage) {
+                // 检查辅助应用白名单：当前活动下的辅助应用不触发切换
+                if (currentTask != null && isAssistantApp(currentTask.category, currentPackage)) {
+                    AppLogger.d("辅助应用，不切换: $currentPackage (当前: ${currentTask.category})")
+                    return
+                }
+                
                 AppLogger.i("需要切换任务!")
                 // 停止当前任务
                 if (currentTask != null) {
@@ -685,6 +724,14 @@ class AppMonitorService : Service() {
             AppLogger.e("获取前台App失败: ${e.message}", e)
             return null
         }
+    }
+    
+    /**
+     * 检查是否是辅助应用（当前活动下不应触发切换的应用）
+     */
+    private fun isAssistantApp(currentCategory: String, newPackage: String): Boolean {
+        val allowedPackages = assistantApps[currentCategory] ?: return false
+        return allowedPackages.contains(newPackage)
     }
     
     private fun mapPackageToCategory(packageName: String): String? {
