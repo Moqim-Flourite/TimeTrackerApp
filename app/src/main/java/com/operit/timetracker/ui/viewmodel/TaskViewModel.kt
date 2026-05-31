@@ -6,6 +6,8 @@ import androidx.lifecycle.viewModelScope
 import com.operit.timetracker.data.AppStat
 import com.operit.timetracker.data.CategoryStat
 import com.operit.timetracker.data.DataStore
+import com.operit.timetracker.data.MonitorState
+import com.operit.timetracker.data.SynonymMatcher
 import com.operit.timetracker.data.TimeRecord
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,6 +22,9 @@ import java.util.Locale
 class TaskViewModel(application: Application) : AndroidViewModel(application) {
     private val dataStore = DataStore(application)
     private val synonymMatcher = SynonymMatcher(application)
+    
+    // 需要锁定监控的任务（手动切换后暂停自动检测）
+    private val lockedTasks = setOf("吃饭", "睡觉")
 
     // 当前任务状态
     private val _currentTask = MutableStateFlow<TimeRecord?>(null)
@@ -148,6 +153,18 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
                     "✅ 已开始记录：$matchedCategory"
                 }
                 _message.value = msg
+                
+                // 锁定任务：暂停自动监控
+                if (matchedCategory in lockedTasks) {
+                    val state = dataStore.loadMonitorState() ?: MonitorState()
+                    dataStore.saveMonitorState(state.copy(
+                        locked = true,
+                        taskName = matchedCategory,
+                        reason = "手动锁定",
+                        lockedAt = System.currentTimeMillis()
+                    ))
+                    _message.value = "${_message.value}\n🔒 自动监控已暂停，停止任务后恢复"
+                }
 
                 loadStats()
                 loadAllRecords()
@@ -162,6 +179,18 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
             val result = stopCurrentTaskInternal()
             if (result != null) {
                 _message.value = "✅ 已结束：${result.category}，用时：${formatDuration(result.durationSeconds)}"
+                
+                // 解锁任务：恢复自动监控
+                if (result.category in lockedTasks) {
+                    val state = dataStore.loadMonitorState() ?: MonitorState()
+                    dataStore.saveMonitorState(state.copy(
+                        locked = false,
+                        taskName = "",
+                        reason = "",
+                        lockedAt = 0
+                    ))
+                    _message.value = "${_message.value}\n🔓 自动监控已恢复"
+                }
                 loadStats()
                 loadAllRecords()
             } else {
