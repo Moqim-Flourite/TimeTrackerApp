@@ -29,6 +29,7 @@ class AppMonitorService : Service() {
         private const val NOTIFICATION_UPDATE_MS = 1_000L // 1秒更新通知
         private const val ALARM_INTERVAL_MS = 60_000L // AlarmManager 60秒心跳
         private const val WAKELOCK_TIMEOUT_MS = 10 * 60 * 1000L // WakeLock 10分钟超时
+        private const val IDLE_PACKAGE = "__SCREEN_OFF__" // 空闲任务标记包名
         
         // App名称缓存，避免频繁查询PackageManager
         private val appNameCache = mutableMapOf<String, String>()
@@ -87,8 +88,6 @@ class AppMonitorService : Service() {
     // 屏幕状态监听
     private var screenStateReceiver: ScreenStateReceiver? = null
     
-    // 上次检测到屏幕亮起的时间，用于判断唤醒后是否需要补检测
-    private var lastScreenOnTime = 0L
     
     // App分类映射 - 完整版（来自Linux端 + 补充）
     private val appCategoryMap = mapOf(
@@ -295,7 +294,8 @@ class AppMonitorService : Service() {
         "com.android.launcher",
         "com.miui.home",
         "com.android.systemui",
-        "com.operit.timetracker" // 自身
+        "com.operit.timetracker", // 自身
+        IDLE_PACKAGE // 空闲任务标记
     )
     
     // 当前前台应用信息
@@ -563,6 +563,13 @@ class AppMonitorService : Service() {
             return
         }
         
+        // 如果当前是空闲任务（熄屏），等 USER_PRESENT 解锁后再处理
+        val currentTask = dataStore.loadCurrentTask()
+        if (currentTask != null && currentTask.originalInput == IDLE_PACKAGE) {
+            AppLogger.d("当前为空闲状态，等待用户解锁")
+            return
+        }
+        
         // 获取当前前台App
         val currentPackage = getCurrentForegroundApp()
         AppLogger.i("前台App: ${currentPackage ?: "null"}")
@@ -608,28 +615,6 @@ class AppMonitorService : Service() {
             // 无法获取前台App
             AppLogger.w("无法获取前台App")
             handleScreenState()
-            
-            // 如果屏幕关闭了，且有正在进行的任务，应该暂停/停止它
-            // 防止熄屏后任务持续计时数小时
-            val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
-            val isScreenOn = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT_WATCH) {
-                pm.isInteractive
-            } else {
-                @Suppress("DEPRECATION")
-                pm.isScreenOn
-            }
-            
-            if (!isScreenOn) {
-                val currentTask = dataStore.loadCurrentTask()
-                if (currentTask != null) {
-                    val elapsed = System.currentTimeMillis() - currentTask.startTime
-                    // 如果任务已经运行超过 2 分钟且屏幕关闭，停止它
-                    if (elapsed > 2 * 60 * 1000) {
-                        AppLogger.i("屏幕关闭且任务运行超过2分钟，停止任务: ${currentTask.category}")
-                        stopCurrentTask(currentTask)
-                    }
-                }
-            }
         }
         
         // 打印状态文件内容
@@ -774,75 +759,44 @@ class AppMonitorService : Service() {
     }
     
     /**
-     * 屏幕亮起时被调用，补检测 + 恢复监控
+     * 屏幕熄灭时调用：停止当前任务，开始记录「空闲」
      */
-    fun onScreenOn() {
-        lastScreenOnTime = System.currentTimeMillis()
-        AppLogger.i("屏幕亮起，执行补检测")
+    fun onScreenOff() {
+        AppLogger.i("屏幕熄灭，开始记录空闲时间")
+        val currentTask = dataStore.loadCurrentTask()
+        if (currentTask != null && currentTask.originalInput != IDLE_PACKAGE) {
+            stopCurrentTask(currentTask)
+        }
+        // 开始空闲任务（如果还没有的话）
+        if (dataStore.loadCurrentTask() == null) {
+            startNewTask("空闲", IDLE_PACKAGE)
+        }
+    }
+    
+    /**
+     * 用户解锁时调用：停止空闲任务，恢复正常检测
+     */
+    fun onUserPresent() {
+        AppLogger.i("用户解锁，结束空闲时间")
+        val currentTask = dataStore.loadCurrentTask()
+        if (currentTask != null && currentTask.originalInput == IDLE_PACKAGE) {
+            stopCurrentTask(currentTask)
+        }
+        // 立即检测前台 App
         serviceScope.launch {
             try {
-                // 等待 2 秒让系统稳定
-                delay(2000)
-                // 扩大查询窗口到 5 分钟，覆盖熄屏期间切换的 App
-                checkCurrentAppAfterWake()
+                checkCurrentApp()
             } catch (e: Exception) {
-                AppLogger.e("屏幕亮起补检测失败", e)
+                AppLogger.e("解锁后检测失败", e)
             }
         }
     }
     
     /**
-     * 唤醒后的前台 App 检测，扩大时间窗口
+     * 屏幕亮起时被调用，仅记录日志（不触发检测，等 USER_PRESENT）
      */
-    private fun checkCurrentAppAfterWake() {
-        AppLogger.d("--- checkCurrentAppAfterWake 开始 ---")
-        
-        if (isMonitorLocked()) {
-            AppLogger.w("监控已锁定，跳过补检测")
-            return
-        }
-        
-        // 扩大到 5 分钟窗口
-        val endTime = System.currentTimeMillis()
-        val beginTime = endTime - 1000 * 60 * 5
-        
-        try {
-            val usageEvents = usageStatsManager.queryEvents(beginTime, endTime)
-            var currentPackage: String? = null
-            var latestEventTime = 0L
-            
-            while (usageEvents.hasNextEvent()) {
-                val event = UsageEvents.Event()
-                usageEvents.getNextEvent(event)
-                
-                val isForegroundEvent = when (event.eventType) {
-                    UsageEvents.Event.ACTIVITY_RESUMED -> true
-                    UsageEvents.Event.MOVE_TO_FOREGROUND -> true
-                    else -> false
-                }
-                
-                if (isForegroundEvent && event.timeStamp > latestEventTime) {
-                    latestEventTime = event.timeStamp
-                    currentPackage = event.packageName
-                }
-            }
-            
-            if (currentPackage != null) {
-                AppLogger.i("补检测到前台App: $currentPackage")
-                val category = mapPackageToCategory(currentPackage)
-                val currentTask = dataStore.loadCurrentTask()
-                
-                if (category != null) {
-                    if (currentTask == null || currentTask.originalInput != currentPackage) {
-                        // 需要切换
-                        if (currentTask != null) stopCurrentTask(currentTask)
-                        startNewTask(category, currentPackage)
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            AppLogger.e("补检测失败: ${e.message}", e)
-        }
+    fun onScreenOn() {
+        AppLogger.i("屏幕亮起（等待用户解锁）")
     }
     
     // ========== WakeLock 管理 ==========
