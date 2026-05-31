@@ -604,6 +604,8 @@ class AppMonitorService : Service() {
                 val category = mapPackageToCategory(currentPackage)
                 AppLogger.i("开始新任务: $category ($currentPackage)")
                 if (category != null) {
+                    // 检查乌龙任务（刚停止的任务是否太短且相似）
+                    checkAndCleanOolongTask(category)
                     startNewTask(category, currentPackage)
                 } else {
                     AppLogger.d("分类为null，跳过: $currentPackage")
@@ -751,6 +753,59 @@ class AppMonitorService : Service() {
         dataStore.saveCurrentTask(null)
         
         Log.i(TAG, "自动停止任务: ${task.category} (时长: ${durationSeconds}秒)")
+    }
+    
+    /**
+     * 检查并清理乌龙任务
+     * 条件：上一任务 <60 秒 + 5 分钟内 + 名字相似
+     */
+    private fun checkAndCleanOolongTask(newCategory: String) {
+        val records = dataStore.loadRecords()
+        if (records.isEmpty()) return
+        
+        val lastRecord = records.last()
+        
+        // 条件1：持续时间 < 60 秒
+        if (lastRecord.durationSeconds >= 60) return
+        
+        // 条件2：刚结束（5 分钟内）
+        val endTime = lastRecord.endTime ?: return
+        if (System.currentTimeMillis() - endTime > 5 * 60 * 1000) return
+        
+        // 条件3：名字相似
+        val similarity = stringSimilarity(lastRecord.category, newCategory)
+        if (similarity < 0.6) return
+        
+        // 确认是乌龙，删除
+        dataStore.deleteRecord(lastRecord.id)
+        AppLogger.i("乌龙任务已清理: ${lastRecord.category} (${lastRecord.durationSeconds}秒) → $newCategory (相似度: ${(similarity * 100).toInt()}%)")
+    }
+    
+    /**
+     * 简单字符串相似度（0.0 ~ 1.0）
+     * 基于最长公共子序列 / 较长字符串长度
+     */
+    private fun stringSimilarity(a: String, b: String): Double {
+        if (a == b) return 1.0
+        if (a.isEmpty() || b.isEmpty()) return 0.0
+        val lcs = longestCommonSubsequence(a, b)
+        return lcs.toDouble() / maxOf(a.length, b.length)
+    }
+    
+    private fun longestCommonSubsequence(a: String, b: String): Int {
+        val m = a.length
+        val n = b.length
+        val dp = Array(m + 1) { IntArray(n + 1) }
+        for (i in 1..m) {
+            for (j in 1..n) {
+                dp[i][j] = if (a[i - 1] == b[j - 1]) {
+                    dp[i - 1][j - 1] + 1
+                } else {
+                    maxOf(dp[i - 1][j], dp[i][j - 1])
+                }
+            }
+        }
+        return dp[m][n]
     }
     
     private fun handleScreenState() {
