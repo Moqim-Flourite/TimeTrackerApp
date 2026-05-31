@@ -19,6 +19,7 @@ import java.util.Locale
 
 class TaskViewModel(application: Application) : AndroidViewModel(application) {
     private val dataStore = DataStore(application)
+    private val synonymMatcher = SynonymMatcher(application)
 
     // 当前任务状态
     private val _currentTask = MutableStateFlow<TimeRecord?>(null)
@@ -117,10 +118,17 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
                 // 先停止当前任务
                 stopCurrentTaskInternal()
 
+                // 同义词/意图识别
+                val existingCategories = dataStore.getCategoryStats()
+                    .map { it.category to it.totalDuration }
+                val (matchedCategory, isNew) = synonymMatcher.findBestCategory(
+                    taskName, existingCategories
+                )
+                
                 val now = System.currentTimeMillis()
                 val record = TimeRecord(
                     id = 0, // 会由 DataStore 分配
-                    category = taskName,
+                    category = matchedCategory,
                     startTime = now,
                     endTime = null,
                     durationSeconds = 0,
@@ -131,7 +139,15 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
 
                 _currentTask.value = saved
                 _isRunning.value = true
-                _message.value = "✅ 已开始记录：${saved.category}"
+                
+                val msg = if (isNew) {
+                    "✅ 已开始记录：$matchedCategory（新类别）"
+                } else if (matchedCategory != taskName) {
+                    "✅ 已开始记录：$matchedCategory（识别：$taskName → $matchedCategory）"
+                } else {
+                    "✅ 已开始记录：$matchedCategory"
+                }
+                _message.value = msg
 
                 loadStats()
                 loadAllRecords()
