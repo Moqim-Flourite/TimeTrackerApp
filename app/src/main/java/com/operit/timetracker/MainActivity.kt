@@ -13,6 +13,7 @@ import com.operit.timetracker.ui.MainViewModel
 import com.operit.timetracker.ui.navigation.AppNavigation
 import com.operit.timetracker.ui.theme.TimeTrackerTheme
 import com.operit.timetracker.ui.viewmodel.TaskViewModel
+import com.operit.timetracker.service.AppLogger
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
