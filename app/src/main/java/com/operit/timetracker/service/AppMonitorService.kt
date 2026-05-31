@@ -619,6 +619,12 @@ class AppMonitorService : Service() {
             val category = mapPackageToCategory(currentPackage)
             if (category == null) {
                 AppLogger.d("忽略App: $currentPackage ($currentForegroundAppName)")
+                // 停止当前任务（用户已离开上一个 app）
+                val currentTask = dataStore.loadCurrentTask()
+                if (currentTask != null && currentTask.originalInput != IDLE_PACKAGE) {
+                    AppLogger.i("用户进入忽略App，停止当前任务: ${currentTask.category}")
+                    stopCurrentTask(currentTask)
+                }
                 return
             }
             
