@@ -11,6 +11,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -18,8 +19,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -227,19 +227,28 @@ fun CategoryPieChartSection(stats: List<CategoryStat>, viewModel: TaskViewModel)
                         data = stats.map { it.category to it.totalDuration.toFloat() },
                         modifier = Modifier.fillMaxSize()
                     )
-                    // 中心文字
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = viewModel.formatDurationText(totalDuration),
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Text(
-                            text = "总计",
-                            fontSize = 10.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                    // 中心文字（带半透明背景，确保在扇形上可读）
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                        modifier = Modifier.size(70.dp)
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Text(
+                                text = viewModel.formatDurationText(totalDuration),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = "总计",
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
 
@@ -272,7 +281,7 @@ fun CategoryPieChartSection(stats: List<CategoryStat>, viewModel: TaskViewModel)
     }
 }
 
-// ========== 饼图绘制 ==========
+// ========== 饼图绘制（扇形） ==========
 
 @Composable
 fun PieChart(
@@ -296,12 +305,11 @@ fun PieChart(
     Canvas(modifier = modifier) {
         val canvasSize = size.minDimension
         val radius = canvasSize / 2
-        val strokeWidth = canvasSize * 0.25f // 环形宽度
         val topLeft = Offset(
-            (size.width - canvasSize) / 2 + strokeWidth / 2,
-            (size.height - canvasSize) / 2 + strokeWidth / 2
+            (size.width - canvasSize) / 2,
+            (size.height - canvasSize) / 2
         )
-        val arcSize = Size(canvasSize - strokeWidth, canvasSize - strokeWidth)
+        val arcSize = Size(canvasSize, canvasSize)
 
         var startAngle = -90f // 从顶部开始
 
@@ -311,10 +319,10 @@ fun PieChart(
                 color = pieColors[index % pieColors.size],
                 startAngle = startAngle,
                 sweepAngle = sweepAngle,
-                useCenter = false,
+                useCenter = true, // 扇形：连接到圆心
                 topLeft = topLeft,
                 size = arcSize,
-                style = Stroke(width = strokeWidth, cap = StrokeCap.Butt)
+                style = Fill // 实心填充
             )
             startAngle += sweepAngle
         }

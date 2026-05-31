@@ -28,6 +28,7 @@ class AppMonitorService : Service() {
         private const val CHECK_INTERVAL_MS = 2_000L // 2秒检查一次，更快响应
         private const val NOTIFICATION_UPDATE_MS = 1_000L // 1秒更新通知
         private const val ALARM_INTERVAL_MS = 60_000L // AlarmManager 60秒心跳
+        private const val WAKELOCK_TIMEOUT_MS = 10 * 60 * 1000L // WakeLock 10分钟超时
         
         // App名称缓存，避免频繁查询PackageManager
         private val appNameCache = mutableMapOf<String, String>()
@@ -503,13 +504,14 @@ class AppMonitorService : Service() {
     }
     
     private fun registerScreenStateReceiver() {
-        screenStateReceiver = ScreenStateReceiver()
+        screenStateReceiver = ScreenStateReceiver(this)
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_USER_PRESENT)
         }
         registerReceiver(screenStateReceiver, filter)
+        AppLogger.i("屏幕状态监听已动态注册")
     }
     
     private fun unregisterScreenStateReceiver() {
@@ -525,10 +527,19 @@ class AppMonitorService : Service() {
     private fun startMonitoring() {
         monitorJob = serviceScope.launch {
             Log.i(TAG, "App监控服务启动")
+            var wakelockRenewCounter = 0
             
             while (isActive) {
                 try {
                     checkCurrentApp()
+                    
+                    // 每 5 分钟续期一次 WakeLock（在超时前续上）
+                    wakelockRenewCounter++
+                    if (wakelockRenewCounter >= 150) { // 150 * 2s = 300s = 5min
+                        wakelockRenewCounter = 0
+                        mainHandler.post { renewWakeLock() }
+                    }
+                    
                     delay(CHECK_INTERVAL_MS)
                 } catch (e: Exception) {
                     Log.e(TAG, "监控异常", e)
@@ -843,11 +854,22 @@ class AppMonitorService : Service() {
                 android.os.PowerManager.PARTIAL_WAKE_LOCK,
                 "TimeTracker::MonitorWakeLock"
             ).apply {
-                acquire()
+                acquire(WAKELOCK_TIMEOUT_MS) // 带超时，防止 ROM 强制回收记电池异常
             }
-            AppLogger.i("WakeLock 已获取")
+            AppLogger.i("WakeLock 已获取，超时 ${WAKELOCK_TIMEOUT_MS / 1000}秒")
         } catch (e: Exception) {
             AppLogger.e("获取 WakeLock 失败", e)
+        }
+    }
+    
+    private fun renewWakeLock() {
+        try {
+            wakeLock?.let {
+                if (it.isHeld) it.release()
+            }
+            acquireWakeLock()
+        } catch (e: Exception) {
+            AppLogger.e("续期 WakeLock 失败", e)
         }
     }
     

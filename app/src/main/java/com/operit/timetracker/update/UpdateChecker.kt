@@ -160,10 +160,25 @@ class UpdateChecker(private val context: Context) {
 
             val apkFile = File(dir, updateInfo.apkFileName)
 
-            // 如果已下载过同名文件，直接返回
+            // 如果已下载过同名文件，用 HEAD 请求比对大小，更准确
             if (apkFile.exists() && apkFile.length() > 100_000) {
-                Log.i(TAG, "APK 已存在: ${apkFile.absolutePath}")
-                return@withContext Result.success(apkFile)
+                try {
+                    val headConn = openConnection(URL(updateInfo.apkDownloadUrl), "HEAD")
+                    val remoteSize = headConn.contentLength.toLong()
+                    headConn.disconnect()
+                    
+                    if (remoteSize > 0 && apkFile.length() == remoteSize) {
+                        Log.i(TAG, "APK 已存在且大小匹配 (${apkFile.length()} bytes)，跳过下载")
+                        return@withContext Result.success(apkFile)
+                    } else {
+                        Log.i(TAG, "APK 大小不匹配: 本地=${apkFile.length()}, 远程=$remoteSize，重新下载")
+                        apkFile.delete()
+                    }
+                } catch (e: Exception) {
+                    // HEAD 请求失败，保守起见直接用缓存
+                    Log.w(TAG, "HEAD 请求失败，使用缓存: ${e.message}")
+                    return@withContext Result.success(apkFile)
+                }
             }
 
             Log.i(TAG, "开始下载: ${updateInfo.apkDownloadUrl}")

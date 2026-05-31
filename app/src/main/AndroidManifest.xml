@@ -45,16 +45,8 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
         
-        <!-- 屏幕状态监听广播 -->
-        <receiver
-            android:name=".service.ScreenStateReceiver"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="android.intent.action.SCREEN_OFF" />
-                <action android:name="android.intent.action.SCREEN_ON" />
-                <action android:name="android.intent.action.USER_PRESENT" />
-            </intent-filter>
-        </receiver>
+        <!-- ScreenStateReceiver: 仅通过 AppMonitorService 动态注册 -->
+        <!-- Android 8+ 不向静态注册的 receiver 投递 SCREEN_ON/OFF -->
         
         <!-- 开机自启广播 -->
         <receiver
