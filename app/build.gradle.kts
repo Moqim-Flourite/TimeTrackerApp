@@ -3,6 +3,13 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+val keystoreProperties = java.util.Properties().apply {
+    val keystoreFile = file("local.properties")
+    if (keystoreFile.exists()) {
+        load(keystoreFile.inputStream())
+    }
+}
+
 android {
     namespace = "com.operit.timetracker"
     compileSdk = 35
@@ -20,18 +27,14 @@ android {
         }
     }
 
-    val keystoreProperties = java.util.Properties()
-    val keystoreFile = file("../local.properties")
-    if (keystoreFile.exists()) {
-        keystoreProperties.load(keystoreFile.inputStream())
-    }
+    val keystorePropertiesRef = keystoreProperties
 
     signingConfigs {
         create("release") {
-            storeFile = file("../release-key.jks")
-            storePassword = keystoreProperties.getProperty("keystore.storePassword", "")
-            keyAlias = keystoreProperties.getProperty("keystore.keyAlias", "")
-            keyPassword = keystoreProperties.getProperty("keystore.keyPassword", "")
+            storeFile = file("release-key.jks")
+            storePassword = keystorePropertiesRef.getProperty("keystore.storePassword", "")
+            keyAlias = keystorePropertiesRef.getProperty("keystore.keyAlias", "")
+            keyPassword = keystorePropertiesRef.getProperty("keystore.keyPassword", "")
         }
     }
 

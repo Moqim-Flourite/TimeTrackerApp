@@ -20,3 +20,5 @@ tools/
 *.apk
 release-key.jks
 *.idsig
+.gradle-home/
+.gradle-home/

@@ -199,8 +199,7 @@ class UpdateChecker(private val context: Context) {
      * 请求 URL 并返回响应体文本
      */
     private fun fetchUrl(urlString: String): String {
-        val conn = openConnection(URL(urlString), "GET")
-        conn.setRequestProperty("Accept", "application/vnd.github.v3+json")
+        val conn = openConnection(URL(urlString), "GET", mapOf("Accept" to "application/vnd.github.v3+json"))
         
         val responseCode = conn.responseCode
         if (responseCode != 200) {
@@ -217,7 +216,7 @@ class UpdateChecker(private val context: Context) {
     /**
      * 打开 HTTP 连接，支持多级重定向（GitHub 下载经常 302 链式跳转）
      */
-    private fun openConnection(url: URL, method: String): HttpURLConnection {
+    private fun openConnection(url: URL, method: String, headers: Map<String, String> = emptyMap()): HttpURLConnection {
         var currentUrl = url
         var redirectCount = 0
 
@@ -225,6 +224,9 @@ class UpdateChecker(private val context: Context) {
             val conn = currentUrl.openConnection() as HttpURLConnection
             conn.requestMethod = method
             conn.setRequestProperty("User-Agent", "TimeTracker-Android/${getCurrentVersion()}")
+            for ((key, value) in headers) {
+                conn.setRequestProperty(key, value)
+            }
             conn.connectTimeout = 15000
             conn.readTimeout = 60000
             conn.instanceFollowRedirects = false // 手动处理重定向
