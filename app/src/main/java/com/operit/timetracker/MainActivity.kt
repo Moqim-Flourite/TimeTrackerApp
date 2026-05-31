@@ -41,10 +41,15 @@ class MainActivity : ComponentActivity() {
             val isMonitoring = monitorState == null || !monitorState.locked
             if (isMonitoring && !com.operit.timetracker.service.AppMonitorService.isRunning(this)) {
                 android.util.Log.i("MainActivity", "onResume: 监控服务未运行，自动重启")
+                AppLogger.i("MainActivity onResume: 监控服务未运行，自动重启")
                 com.operit.timetracker.service.AppMonitorService.start(this)
+            } else if (isMonitoring) {
+                // 服务在运行，触发一次补检测（可能在其他App停留了很久）
+                AppLogger.i("MainActivity onResume: 触发补检测")
             }
         } catch (e: Exception) {
             android.util.Log.e("MainActivity", "onResume检查失败", e)
+            AppLogger.e("MainActivity onResume检查失败", e)
         }
     }
 }

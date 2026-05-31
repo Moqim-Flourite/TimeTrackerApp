@@ -27,9 +27,15 @@ class AppMonitorService : Service() {
         private const val CHANNEL_ID = "app_monitor_channel"
         private const val CHECK_INTERVAL_MS = 2_000L // 2秒检查一次，更快响应
         private const val NOTIFICATION_UPDATE_MS = 1_000L // 1秒更新通知
+        private const val ALARM_INTERVAL_MS = 60_000L // AlarmManager 60秒心跳
         
         // App名称缓存，避免频繁查询PackageManager
         private val appNameCache = mutableMapOf<String, String>()
+        
+        // 进程级运行状态标记（比 getRunningServices 可靠）
+        @Volatile
+        var isServiceRunning = false
+            private set
         
         fun start(context: Context) {
             val intent = Intent(context, AppMonitorService::class.java)
@@ -45,16 +51,25 @@ class AppMonitorService : Service() {
         }
         
         /**
-         * 检查服务是否正在运行
+         * 检查服务是否正在运行（双重检测：进程级标记 + ActivityManager）
          */
         fun isRunning(context: Context): Boolean {
-            val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-            for (service in manager.getRunningServices(Int.MAX_VALUE)) {
-                if (AppMonitorService::class.java.name == service.service.className) {
-                    return true
+            // 优先使用进程级标记
+            if (isServiceRunning) return true
+            
+            // 降级到 ActivityManager 兜底（API 26+ 可能不准确）
+            return try {
+                val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+                @Suppress("DEPRECATION")
+                for (service in manager.getRunningServices(Int.MAX_VALUE)) {
+                    if (AppMonitorService::class.java.name == service.service.className) {
+                        return true
+                    }
                 }
+                false
+            } catch (e: Exception) {
+                false
             }
-            return false
         }
     }
     
@@ -65,8 +80,14 @@ class AppMonitorService : Service() {
     private var notificationUpdateJob: Job? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     
+    // WakeLock 防止 CPU 休眠
+    private var wakeLock: android.os.PowerManager.WakeLock? = null
+    
     // 屏幕状态监听
     private var screenStateReceiver: ScreenStateReceiver? = null
+    
+    // 上次检测到屏幕亮起的时间，用于判断唤醒后是否需要补检测
+    private var lastScreenOnTime = 0L
     
     // App分类映射 - 完整版（来自Linux端 + 补充）
     private val appCategoryMap = mapOf(
@@ -291,11 +312,20 @@ class AppMonitorService : Service() {
         AppLogger.i("数据目录: ${filesDir.absolutePath}")
         AppLogger.i("UsageStatsManager: ${usageStatsManager != null}")
         
+        // 标记服务正在运行
+        isServiceRunning = true
+        
         // 创建通知渠道
         createNotificationChannel()
         
+        // 获取 WakeLock 防止 CPU 休眠
+        acquireWakeLock()
+        
         // 注册屏幕状态监听
         registerScreenStateReceiver()
+        
+        // 设置 AlarmManager 定期心跳（兜底保活）
+        scheduleAlarmHeartbeat()
         
         // 立即更新通知
         updateNotification()
@@ -330,10 +360,23 @@ class AppMonitorService : Service() {
     
     override fun onDestroy() {
         super.onDestroy()
+        isServiceRunning = false
         stopMonitoring()
         stopNotificationUpdater()
         unregisterScreenStateReceiver()
+        cancelAlarmHeartbeat()
+        releaseWakeLock()
         serviceScope.cancel()
+        
+        // 最后一搏：延迟 1 秒后尝试重启服务
+        Handler(Looper.getMainLooper()).postDelayed({
+            try {
+                AppLogger.i("Service onDestroy 后尝试自重启")
+                start(this)
+            } catch (e: Exception) {
+                AppLogger.e("自重启失败", e)
+            }
+        }, 1000)
     }
     
     private fun createNotificationChannel() {
@@ -551,8 +594,31 @@ class AppMonitorService : Service() {
                 AppLogger.d("任务未变化，继续监控")
             }
         } else {
-            AppLogger.w("无法获取前台App，可能处于熄屏状态")
+            // 无法获取前台App
+            AppLogger.w("无法获取前台App")
             handleScreenState()
+            
+            // 如果屏幕关闭了，且有正在进行的任务，应该暂停/停止它
+            // 防止熄屏后任务持续计时数小时
+            val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            val isScreenOn = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT_WATCH) {
+                pm.isInteractive
+            } else {
+                @Suppress("DEPRECATION")
+                pm.isScreenOn
+            }
+            
+            if (!isScreenOn) {
+                val currentTask = dataStore.loadCurrentTask()
+                if (currentTask != null) {
+                    val elapsed = System.currentTimeMillis() - currentTask.startTime
+                    // 如果任务已经运行超过 2 分钟且屏幕关闭，停止它
+                    if (elapsed > 2 * 60 * 1000) {
+                        AppLogger.i("屏幕关闭且任务运行超过2分钟，停止任务: ${currentTask.category}")
+                        stopCurrentTask(currentTask)
+                    }
+                }
+            }
         }
         
         // 打印状态文件内容
@@ -692,7 +758,150 @@ class AppMonitorService : Service() {
     }
     
     private fun handleScreenState() {
-        // 这里可以添加熄屏处理逻辑
+        // 熄屏状态下前台App检测不可靠，记录日志即可
+        AppLogger.d("屏幕熄灭状态，跳过前台App检测")
+    }
+    
+    /**
+     * 屏幕亮起时被调用，补检测 + 恢复监控
+     */
+    fun onScreenOn() {
+        lastScreenOnTime = System.currentTimeMillis()
+        AppLogger.i("屏幕亮起，执行补检测")
+        serviceScope.launch {
+            try {
+                // 等待 2 秒让系统稳定
+                delay(2000)
+                // 扩大查询窗口到 5 分钟，覆盖熄屏期间切换的 App
+                checkCurrentAppAfterWake()
+            } catch (e: Exception) {
+                AppLogger.e("屏幕亮起补检测失败", e)
+            }
+        }
+    }
+    
+    /**
+     * 唤醒后的前台 App 检测，扩大时间窗口
+     */
+    private fun checkCurrentAppAfterWake() {
+        AppLogger.d("--- checkCurrentAppAfterWake 开始 ---")
+        
+        if (isMonitorLocked()) {
+            AppLogger.w("监控已锁定，跳过补检测")
+            return
+        }
+        
+        // 扩大到 5 分钟窗口
+        val endTime = System.currentTimeMillis()
+        val beginTime = endTime - 1000 * 60 * 5
+        
+        try {
+            val usageEvents = usageStatsManager.queryEvents(beginTime, endTime)
+            var currentPackage: String? = null
+            var latestEventTime = 0L
+            
+            while (usageEvents.hasNextEvent()) {
+                val event = UsageEvents.Event()
+                usageEvents.getNextEvent(event)
+                
+                val isForegroundEvent = when (event.eventType) {
+                    UsageEvents.Event.ACTIVITY_RESUMED -> true
+                    UsageEvents.Event.MOVE_TO_FOREGROUND -> true
+                    else -> false
+                }
+                
+                if (isForegroundEvent && event.timeStamp > latestEventTime) {
+                    latestEventTime = event.timeStamp
+                    currentPackage = event.packageName
+                }
+            }
+            
+            if (currentPackage != null) {
+                AppLogger.i("补检测到前台App: $currentPackage")
+                val category = mapPackageToCategory(currentPackage)
+                val currentTask = dataStore.loadCurrentTask()
+                
+                if (category != null) {
+                    if (currentTask == null || currentTask.originalInput != currentPackage) {
+                        // 需要切换
+                        if (currentTask != null) stopCurrentTask(currentTask)
+                        startNewTask(category, currentPackage)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            AppLogger.e("补检测失败: ${e.message}", e)
+        }
+    }
+    
+    // ========== WakeLock 管理 ==========
+    
+    private fun acquireWakeLock() {
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            wakeLock = pm.newWakeLock(
+                android.os.PowerManager.PARTIAL_WAKE_LOCK,
+                "TimeTracker::MonitorWakeLock"
+            ).apply {
+                acquire()
+            }
+            AppLogger.i("WakeLock 已获取")
+        } catch (e: Exception) {
+            AppLogger.e("获取 WakeLock 失败", e)
+        }
+    }
+    
+    private fun releaseWakeLock() {
+        try {
+            wakeLock?.let {
+                if (it.isHeld) {
+                    it.release()
+                    AppLogger.i("WakeLock 已释放")
+                }
+            }
+            wakeLock = null
+        } catch (e: Exception) {
+            AppLogger.e("释放 WakeLock 失败", e)
+        }
+    }
+    
+    // ========== AlarmManager 心跳（兜底保活） ==========
+    
+    private fun scheduleAlarmHeartbeat() {
+        try {
+            val alarmManager = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+            val intent = Intent(this, com.operit.timetracker.service.HeartbeatReceiver::class.java)
+            val pendingIntent = PendingIntent.getBroadcast(
+                this, 9999, intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            
+            // 设置精确闹钟，每 60 秒触发一次
+            alarmManager.setRepeating(
+                android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                android.os.SystemClock.elapsedRealtime() + ALARM_INTERVAL_MS,
+                ALARM_INTERVAL_MS,
+                pendingIntent
+            )
+            AppLogger.i("AlarmManager 心跳已设置")
+        } catch (e: Exception) {
+            AppLogger.e("设置 AlarmManager 失败", e)
+        }
+    }
+    
+    private fun cancelAlarmHeartbeat() {
+        try {
+            val alarmManager = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+            val intent = Intent(this, com.operit.timetracker.service.HeartbeatReceiver::class.java)
+            val pendingIntent = PendingIntent.getBroadcast(
+                this, 9999, intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            alarmManager.cancel(pendingIntent)
+            AppLogger.i("AlarmManager 心跳已取消")
+        } catch (e: Exception) {
+            AppLogger.e("取消 AlarmManager 失败", e)
+        }
     }
     
     private fun isMonitorLocked(): Boolean {

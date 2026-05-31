@@ -3,6 +3,7 @@ package com.operit.timetracker.ui.viewmodel
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.operit.timetracker.data.AppStat
 import com.operit.timetracker.data.CategoryStat
 import com.operit.timetracker.data.DataStore
 import com.operit.timetracker.data.TimeRecord
@@ -42,6 +43,16 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _totalStats = MutableStateFlow<List<CategoryStat>>(emptyList())
     val totalStats: StateFlow<List<CategoryStat>> = _totalStats.asStateFlow()
+    
+    // App 维度统计
+    private val _dailyAppStats = MutableStateFlow<List<AppStat>>(emptyList())
+    val dailyAppStats: StateFlow<List<AppStat>> = _dailyAppStats.asStateFlow()
+    
+    private val _weeklyAppStats = MutableStateFlow<List<AppStat>>(emptyList())
+    val weeklyAppStats: StateFlow<List<AppStat>> = _weeklyAppStats.asStateFlow()
+    
+    private val _totalAppStats = MutableStateFlow<List<AppStat>>(emptyList())
+    val totalAppStats: StateFlow<List<AppStat>> = _totalAppStats.asStateFlow()
 
     // 所有记录
     private val _allRecords = MutableStateFlow<List<TimeRecord>>(emptyList())
@@ -187,6 +198,7 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
                 val endOfDay = startOfDay + 24 * 60 * 60 * 1000
 
                 _dailyStats.value = dataStore.getCategoryStats(startOfDay, endOfDay)
+                _dailyAppStats.value = dataStore.getAppStats(startOfDay, endOfDay)
 
                 // 本周
                 val calWeek = Calendar.getInstance()
@@ -196,9 +208,11 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
                 calWeek.set(Calendar.SECOND, 0)
                 calWeek.set(Calendar.MILLISECOND, 0)
                 _weeklyStats.value = dataStore.getCategoryStats(startOfDay = calWeek.timeInMillis)
+                _weeklyAppStats.value = dataStore.getAppStats(startOfDay = calWeek.timeInMillis)
 
                 // 总计
                 _totalStats.value = dataStore.getCategoryStats()
+                _totalAppStats.value = dataStore.getAppStats()
             } catch (e: Exception) {
                 _message.value = "❌ 加载统计失败：${e.message}"
             }
@@ -246,6 +260,16 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
             hours > 0 -> "${hours}小时${minutes}分钟"
             minutes > 0 -> "${minutes}分钟"
             else -> "${secs}秒"
+        }
+    }
+    
+    fun getAppName(packageName: String): String {
+        return try {
+            val pm = getApplication<Application>().packageManager
+            val appInfo = pm.getApplicationInfo(packageName, 0)
+            pm.getApplicationLabel(appInfo).toString()
+        } catch (e: Exception) {
+            packageName
         }
     }
 }

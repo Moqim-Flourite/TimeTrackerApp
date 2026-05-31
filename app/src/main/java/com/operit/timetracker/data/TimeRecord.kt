@@ -14,3 +14,8 @@ data class CategoryStat(
     val category: String,
     val totalDuration: Long
 )
+
+data class AppStat(
+    val packageName: String,
+    val totalDuration: Long
+)

@@ -149,6 +149,28 @@ class DataStore(context: Context) {
             .sortedByDescending { it.totalDuration }
     }
     
+    /**
+     * 按 App（包名）统计使用时长
+     */
+    fun getAppStats(startOfDay: Long? = null, endOfDay: Long? = null): List<AppStat> {
+        val records = loadRecords()
+        val stats = mutableMapOf<String, Long>()
+        
+        for (record in records) {
+            if (record.endTime == null) continue
+            if (record.originalInput.isBlank()) continue
+            
+            if (startOfDay != null && record.startTime < startOfDay) continue
+            if (endOfDay != null && record.startTime >= endOfDay) continue
+            
+            val current = stats[record.originalInput] ?: 0
+            stats[record.originalInput] = current + record.durationSeconds
+        }
+        
+        return stats.map { AppStat(it.key, it.value) }
+            .sortedByDescending { it.totalDuration }
+    }
+    
     // ========== 监控状态管理 ==========
     
     private val monitorStateFile = File(dataDir, "monitor_state.json")

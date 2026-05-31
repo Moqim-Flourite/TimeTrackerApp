@@ -10,7 +10,6 @@ import android.util.Log
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
@@ -19,7 +18,7 @@ import java.net.URL
 
 /**
  * GitHub Release 更新检查器
- * 
+ *
  * 工作原理：
  * 1. 请求 GitHub API 获取最新 Release
  * 2. 比较 tag_name（版本号）与当前 App 版本
@@ -29,24 +28,22 @@ class UpdateChecker(private val context: Context) {
 
     companion object {
         private const val TAG = "UpdateChecker"
-        // TODO: 替换为你的 GitHub 仓库
         const val GITHUB_OWNER = "Moqim-Flourite"
         const val GITHUB_REPO = "TimeTrackerApp"
-        private const val API_URL = "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases/latest"
+        private const val API_URL =
+            "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases/latest"
+        private const val MAX_REDIRECTS = 5
     }
 
     data class UpdateInfo(
-        val version: String,          // tag_name, e.g. "v1.0.0"
-        val releaseName: String,      // release title
-        val releaseBody: String,      // release description / changelog
-        val apkDownloadUrl: String,   // direct download URL for .apk asset
-        val apkFileName: String,      // file name of the .apk
-        val publishedAt: String       // publish time
+        val version: String,
+        val releaseName: String,
+        val releaseBody: String,
+        val apkDownloadUrl: String,
+        val apkFileName: String,
+        val publishedAt: String
     )
 
-    /**
-     * 获取当前 App 版本名
-     */
     fun getCurrentVersion(): String {
         return try {
             val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
@@ -56,10 +53,6 @@ class UpdateChecker(private val context: Context) {
         }
     }
 
-    /**
-     * 比较版本号: v1.2.3 vs v1.2.4
-     * @return 正数=remote更新, 0=相同, 负数=local更新(不正常)
-     */
     fun compareVersions(local: String, remote: String): Int {
         val cleanLocal = local.removePrefix("v").removePrefix("V")
         val cleanRemote = remote.removePrefix("v").removePrefix("V")
@@ -76,22 +69,17 @@ class UpdateChecker(private val context: Context) {
 
     /**
      * 检查是否有新版本
-     * @return UpdateInfo 如果有更新，null 如果已是最新
      */
     suspend fun checkForUpdate(): Result<UpdateInfo?> = withContext(Dispatchers.IO) {
         try {
             Log.i(TAG, "检查更新: $API_URL")
-            val url = URL(API_URL)
-            val conn = url.openConnection() as HttpURLConnection
-            conn.requestMethod = "GET"
+            val conn = openConnection(URL(API_URL), "GET")
             conn.setRequestProperty("Accept", "application/vnd.github.v3+json")
-            conn.setRequestProperty("User-Agent", "TimeTracker-Android")
-            conn.connectTimeout = 10000
-            conn.readTimeout = 15000
 
             val responseCode = conn.responseCode
             if (responseCode != 200) {
                 val errorStream = conn.errorStream?.bufferedReader()?.readText() ?: ""
+                conn.disconnect()
                 Log.e(TAG, "GitHub API 返回 $responseCode: $errorStream")
                 return@withContext Result.failure(Exception("GitHub API 返回 $responseCode"))
             }
@@ -101,9 +89,9 @@ class UpdateChecker(private val context: Context) {
 
             val json = org.json.JSONObject(body)
             val tagName = json.getString("tag_name")
-            val releaseName = json.getString("name") ?: tagName
-            val releaseBody = json.getString("body") ?: ""
-            val publishedAt = json.getString("published_at") ?: ""
+            val releaseName = json.optString("name", tagName)
+            val releaseBody = json.optString("body", "")
+            val publishedAt = json.optString("published_at", "")
 
             // 从 assets 中找 .apk 文件
             val assets = json.getJSONArray("assets")
@@ -156,39 +144,32 @@ class UpdateChecker(private val context: Context) {
         onProgress: (Int) -> Unit
     ): Result<File> = withContext(Dispatchers.IO) {
         try {
-            val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "updates")
+            val dir = File(
+                context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
+                "updates"
+            )
             if (!dir.exists()) dir.mkdirs()
+
+            // 先清理旧版本 APK（不同文件名的）
+            dir.listFiles()?.forEach { file ->
+                if (file.name.endsWith(".apk") && file.name != updateInfo.apkFileName) {
+                    file.delete()
+                    Log.i(TAG, "清理旧 APK: ${file.name}")
+                }
+            }
+
             val apkFile = File(dir, updateInfo.apkFileName)
 
-            // 如果已下载过同版本，直接返回
+            // 如果已下载过同名文件，直接返回
             if (apkFile.exists() && apkFile.length() > 100_000) {
                 Log.i(TAG, "APK 已存在: ${apkFile.absolutePath}")
                 return@withContext Result.success(apkFile)
             }
 
             Log.i(TAG, "开始下载: ${updateInfo.apkDownloadUrl}")
-            val url = URL(updateInfo.apkDownloadUrl)
-            val conn = url.openConnection() as HttpURLConnection
-            conn.requestMethod = "GET"
-            conn.setRequestProperty("User-Agent", "TimeTracker-Android")
-            conn.connectTimeout = 15000
-            conn.readTimeout = 60000
-            conn.instanceFollowRedirects = true
+            val conn = openConnection(URL(updateInfo.apkDownloadUrl), "GET")
 
             val responseCode = conn.responseCode
-            // 处理 302 重定向（GitHub 下载链接通常会重定向）
-            if (responseCode in 301..308) {
-                val redirectUrl = conn.getHeaderField("Location")
-                conn.disconnect()
-                if (redirectUrl != null) {
-                    val redirectConn = URL(redirectUrl).openConnection() as HttpURLConnection
-                    redirectConn.requestMethod = "GET"
-                    redirectConn.connectTimeout = 15000
-                    redirectConn.readTimeout = 60000
-                    return@withContext downloadFromConnection(redirectConn, apkFile, onProgress)
-                }
-            }
-
             if (responseCode != 200) {
                 conn.disconnect()
                 return@withContext Result.failure(Exception("下载失败: HTTP $responseCode"))
@@ -199,6 +180,37 @@ class UpdateChecker(private val context: Context) {
             Log.e(TAG, "下载 APK 失败", e)
             Result.failure(e)
         }
+    }
+
+    /**
+     * 打开 HTTP 连接，支持多级重定向（GitHub 下载经常 302 链式跳转）
+     */
+    private fun openConnection(url: URL, method: String): HttpURLConnection {
+        var currentUrl = url
+        var redirectCount = 0
+
+        while (redirectCount < MAX_REDIRECTS) {
+            val conn = currentUrl.openConnection() as HttpURLConnection
+            conn.requestMethod = method
+            conn.setRequestProperty("User-Agent", "TimeTracker-Android/${getCurrentVersion()}")
+            conn.connectTimeout = 15000
+            conn.readTimeout = 60000
+            conn.instanceFollowRedirects = false // 手动处理重定向
+
+            val code = conn.responseCode
+            if (code in 301..308) {
+                val location = conn.getHeaderField("Location")
+                conn.disconnect()
+                if (location != null) {
+                    currentUrl = URL(location)
+                    redirectCount++
+                    Log.d(TAG, "重定向 ($redirectCount): $location")
+                    continue
+                }
+            }
+            return conn
+        }
+        throw Exception("重定向次数过多 (${MAX_REDIRECTS})")
     }
 
     private fun downloadFromConnection(
@@ -223,6 +235,14 @@ class UpdateChecker(private val context: Context) {
             }
         }
         conn.disconnect()
+
+        // 验证下载完整性
+        if (totalSize > 0 && apkFile.length() != totalSize.toLong()) {
+            apkFile.delete()
+            return Result.failure(
+                Exception("下载不完整: 期望 ${totalSize} 字节，实际 ${apkFile.length()} 字节")
+            )
+        }
 
         Log.i(TAG, "下载完成: ${apkFile.absolutePath} (${apkFile.length()} bytes)")
         return Result.success(apkFile)
