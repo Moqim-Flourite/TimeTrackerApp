@@ -20,12 +20,18 @@ android {
         }
     }
 
+    val keystoreProperties = java.util.Properties()
+    val keystoreFile = file("../local.properties")
+    if (keystoreFile.exists()) {
+        keystoreProperties.load(keystoreFile.inputStream())
+    }
+
     signingConfigs {
         create("release") {
             storeFile = file("../release-key.jks")
-            storePassword = "timetracker123"
-            keyAlias = "timetracker"
-            keyPassword = "timetracker123"
+            storePassword = keystoreProperties.getProperty("keystore.storePassword", "")
+            keyAlias = keystoreProperties.getProperty("keystore.keyAlias", "")
+            keyPassword = keystoreProperties.getProperty("keystore.keyPassword", "")
         }
     }
 
