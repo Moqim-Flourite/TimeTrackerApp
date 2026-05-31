@@ -233,17 +233,25 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
     fun loadStats() {
         viewModelScope.launch {
             try {
-                // 今日
-                val cal = Calendar.getInstance()
-                cal.set(Calendar.HOUR_OF_DAY, 0)
-                cal.set(Calendar.MINUTE, 0)
-                cal.set(Calendar.SECOND, 0)
-                cal.set(Calendar.MILLISECOND, 0)
-                val startOfDay = cal.timeInMillis
-                val endOfDay = startOfDay + 24 * 60 * 60 * 1000
-
-                _dailyStats.value = dataStore.getCategoryStats(startOfDay, endOfDay)
-                _dailyAppStats.value = dataStore.getAppStats(startOfDay, endOfDay)
+                // 今日（睡眠周期制：以睡觉为分界线）
+                val sleepCycleStart = dataStore.findSleepCycleStart()
+                val now = System.currentTimeMillis()
+                
+                if (sleepCycleStart != null) {
+                    // 有睡觉记录：从睡觉结束到现在
+                    _dailyStats.value = dataStore.getCategoryStats(sleepCycleStart, now)
+                    _dailyAppStats.value = dataStore.getAppStats(sleepCycleStart, now)
+                } else {
+                    // 没有睡觉记录：回退到自然日
+                    val cal = Calendar.getInstance()
+                    cal.set(Calendar.HOUR_OF_DAY, 0)
+                    cal.set(Calendar.MINUTE, 0)
+                    cal.set(Calendar.SECOND, 0)
+                    cal.set(Calendar.MILLISECOND, 0)
+                    val startOfDay = cal.timeInMillis
+                    _dailyStats.value = dataStore.getCategoryStats(startOfDay, now)
+                    _dailyAppStats.value = dataStore.getAppStats(startOfDay, now)
+                }
 
                 // 本周
                 val calWeek = Calendar.getInstance()

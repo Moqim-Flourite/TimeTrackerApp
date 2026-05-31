@@ -138,11 +138,17 @@ class DataStore(context: Context) {
         for (record in records) {
             if (record.endTime == null) continue
             
-            if (startOfDay != null && record.startTime < startOfDay) continue
-            if (endOfDay != null && record.startTime >= endOfDay) continue
+            // 跨日分摊：如果任务跨越了统计边界，按比例分摊
+            val effectiveStart = if (startOfDay != null) maxOf(record.startTime, startOfDay) else record.startTime
+            val effectiveEnd = if (endOfDay != null) minOf(record.endTime, endOfDay) else record.endTime
+            
+            if (effectiveStart >= effectiveEnd) continue // 完全在范围外
+            
+            val durationSeconds = (effectiveEnd - effectiveStart) / 1000
+            if (durationSeconds <= 0) continue
             
             val current = stats[record.category] ?: 0
-            stats[record.category] = current + record.durationSeconds
+            stats[record.category] = current + durationSeconds
         }
         
         return stats.map { CategoryStat(it.key, it.value) }
@@ -160,15 +166,79 @@ class DataStore(context: Context) {
             if (record.endTime == null) continue
             if (record.originalInput.isBlank()) continue
             
-            if (startOfDay != null && record.startTime < startOfDay) continue
-            if (endOfDay != null && record.startTime >= endOfDay) continue
+            // 跨日分摊
+            val effectiveStart = if (startOfDay != null) maxOf(record.startTime, startOfDay) else record.startTime
+            val effectiveEnd = if (endOfDay != null) minOf(record.endTime, endOfDay) else record.endTime
+            
+            if (effectiveStart >= effectiveEnd) continue
+            
+            val durationSeconds = (effectiveEnd - effectiveStart) / 1000
+            if (durationSeconds <= 0) continue
             
             val current = stats[record.originalInput] ?: 0
-            stats[record.originalInput] = current + record.durationSeconds
+            stats[record.originalInput] = current + durationSeconds
         }
         
         return stats.map { AppStat(it.key, it.value) }
             .sortedByDescending { it.totalDuration }
+    }
+    
+    /**
+     * 找到当前睡眠周期的起始时间
+     * 以「睡觉」事件作为一天的分界线：
+     * - 凌晨 0-5 点：找昨晚 21 点后的睡觉
+     * - 白天 5-21 点：找今天凌晨的睡觉，没有则找昨晚的
+     * - 晚上 21-24 点：找今天凌晨的睡觉
+     * 
+     * @return 睡眠周期起始时间戳，如果没找到睡觉记录返回 null
+     */
+    fun findSleepCycleStart(): Long? {
+        val records = loadRecords()
+        val now = System.currentTimeMillis()
+        val cal = java.util.Calendar.getInstance()
+        cal.timeInMillis = now
+        val hour = cal.get(java.util.Calendar.HOUR_OF_DAY)
+        
+        // 定义夜间时段
+        val nightStart = 21 // 晚上 9 点
+        val nightEnd = 5    // 凌晨 5 点
+        
+        // 找最近的「睡觉」记录
+        val sleepRecords = records
+            .filter { it.category == "睡觉" && it.endTime != null }
+            .sortedByDescending { it.startTime }
+        
+        if (sleepRecords.isEmpty()) return null
+        
+        // 根据当前时间确定查找范围
+        val todayMidnight = cal.apply {
+            set(java.util.Calendar.HOUR_OF_DAY, 0)
+            set(java.util.Calendar.MINUTE, 0)
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        
+        return when {
+            hour < nightEnd -> {
+                // 凌晨 0-5 点：找昨晚 21 点后的睡觉
+                val lastNightStart = todayMidnight - (24 - nightStart) * 3600 * 1000L
+                sleepRecords.firstOrNull { it.startTime >= lastNightStart }?.startTime
+            }
+            hour < nightStart -> {
+                // 白天 5-21 点：先找今天凌晨的，再找昨晚的
+                val todaySleep = sleepRecords.firstOrNull { it.startTime >= todayMidnight }
+                if (todaySleep != null) {
+                    todaySleep.startTime
+                } else {
+                    val lastNightStart = todayMidnight - (24 - nightStart) * 3600 * 1000L
+                    sleepRecords.firstOrNull { it.startTime >= lastNightStart }?.startTime
+                }
+            }
+            else -> {
+                // 晚上 21-24 点：找今天凌晨的睡觉
+                sleepRecords.firstOrNull { it.startTime >= todayMidnight }?.startTime
+            }
+        }
     }
     
     // ========== 监控状态管理 ==========
