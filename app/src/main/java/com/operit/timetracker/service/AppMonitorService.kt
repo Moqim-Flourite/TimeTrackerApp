@@ -873,8 +873,17 @@ class AppMonitorService : Service() {
      * 屏幕熄灭时调用：停止当前任务，开始记录「空闲」
      */
     fun onScreenOff() {
-        AppLogger.i("屏幕熄灭，开始记录空闲时间")
+        AppLogger.i("屏幕熄灭")
         val currentTask = dataStore.loadCurrentTask()
+        
+        // 检查是否是持续性任务（手动开始的睡眠、吃饭、工作等）
+        // 持续性任务在锁屏时不中断，继续记录
+        if (isMonitorLocked()) {
+            AppLogger.i("当前处于持续性任务（${currentTask?.category}），锁屏不中断")
+            return
+        }
+        
+        AppLogger.i("开始记录空闲时间")
         if (currentTask != null && currentTask.originalInput != IDLE_PACKAGE) {
             stopCurrentTask(currentTask)
         }

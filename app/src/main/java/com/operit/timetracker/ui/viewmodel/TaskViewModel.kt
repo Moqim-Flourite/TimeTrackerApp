@@ -24,7 +24,8 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
     private val synonymMatcher = SynonymMatcher(application)
     
     // 需要锁定监控的任务（手动切换后暂停自动检测）
-    private val lockedTasks = setOf("吃饭", "睡觉")
+    // 这些任务在锁屏时也不会被切换到空闲模式
+    private val lockedTasks = setOf("吃饭", "睡觉", "工作")
 
     // 当前任务状态
     private val _currentTask = MutableStateFlow<TimeRecord?>(null)
