@@ -61,6 +61,9 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <!-- 自定义 action：AlarmManager 延迟启动和兜底检查 -->
+                <action android:name="com.operit.timetracker.ACTION_DELAYED_START" />
+                <action android:name="com.operit.timetracker.ACTION_FALLBACK_CHECK" />
             </intent-filter>
         </receiver>
         
