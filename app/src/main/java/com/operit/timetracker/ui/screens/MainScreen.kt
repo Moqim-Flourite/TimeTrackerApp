@@ -8,6 +8,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Create
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
@@ -89,6 +90,9 @@ fun MainScreen(viewModel: TaskViewModel, mainViewModel: MainViewModel, navContro
                     }
                     IconButton(onClick = { navController.navigate("history") }) {
                         Icon(Icons.Filled.Menu, contentDescription = "历史记录")
+                    }
+                    IconButton(onClick = { navController.navigate("diary") }) {
+                        Icon(Icons.Filled.Create, contentDescription = "日记回顾")
                     }
                     IconButton(
                         onClick = {
