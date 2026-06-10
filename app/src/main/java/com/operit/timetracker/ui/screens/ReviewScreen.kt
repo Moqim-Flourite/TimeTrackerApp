@@ -9,33 +9,38 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import com.operit.timetracker.diary.DiaryAnalysisResult
 import com.operit.timetracker.diary.DiaryAnalyzerStub
-import com.operit.timetracker.diary.DiaryCategory
+import com.operit.timetracker.diary.DiaryTextBuilder
+import java.time.LocalDate
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ReviewScreen(navController: NavController) {
+    val context = LocalContext.current
     val analyzer = remember { DiaryAnalyzerStub() }
+    val textBuilder = remember { DiaryTextBuilder(context) }
     var results by remember { mutableStateOf<List<DiaryAnalysisResult>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
 
     LaunchedEffect(Unit) {
-        val mockTexts = listOf(
-            "2026-06-02" to "推进了 TimeTrackerApp 确认界面的方案设计",
-            "2026-06-01" to "读完了《置身事内》第三章",
-            "2026-05-31" to "下午跑了 5 公里",
-            "2026-05-30" to "和老友吃了顿火锅",
-            "2026-05-29" to "通勤路上听了两期播客",
-            "2026-05-28" to "晚上打了两把游戏"
-        )
-        results = mockTexts.map { (date, text) ->
-            analyzer.analyze(text, java.time.LocalDate.parse(date))
+        val today = LocalDate.now()
+        val daysToLoad = 7
+        val loaded = mutableListOf<DiaryAnalysisResult>()
+
+        for (i in 0 until daysToLoad) {
+            val date = today.minusDays(i.toLong())
+            val text = textBuilder.buildTextForDate(date)
+            val result = analyzer.analyze(text, date)
+            loaded.add(result)
         }
+
+        results = loaded
         isLoading = false
     }
 
