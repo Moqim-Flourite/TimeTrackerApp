@@ -96,6 +96,11 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
     
+    // 网络请求（OpenAI API）
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // 加密存储（API key）
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

@@ -15,7 +15,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import com.operit.timetracker.diary.DiaryAnalysisResult
+import com.operit.timetracker.diary.DiaryAnalyzerGpt
 import com.operit.timetracker.diary.DiaryAnalyzerStub
+import com.operit.timetracker.diary.ApiKeyManager
 import com.operit.timetracker.diary.DiaryTextBuilder
 import java.time.LocalDate
 
@@ -23,7 +25,12 @@ import java.time.LocalDate
 @Composable
 fun ReviewScreen(navController: NavController) {
     val context = LocalContext.current
-    val analyzer = remember { DiaryAnalyzerStub() }
+    val keyManager = remember { ApiKeyManager(context) }
+    val hasKey = keyManager.hasApiKey()
+    val analyzer = remember(hasKey) {
+        if (hasKey) DiaryAnalyzerGpt(keyManager.getApiKey())
+        else DiaryAnalyzerStub()
+    }
     val textBuilder = remember { DiaryTextBuilder(context) }
     var results by remember { mutableStateOf<List<DiaryAnalysisResult>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
