@@ -45,6 +45,29 @@ class HeartbeatReceiver : BroadcastReceiver() {
                 AppMonitorService.start(context)
             } else {
                 Log.d(TAG, "服务运行正常")
+                
+                // 深度检查：监控循环是否还在跑
+                val lastLoop = AppMonitorService.lastMonitorLoopTimeMs
+                val cycleCount = AppMonitorService.monitorLoopCycleCount
+                val now = System.currentTimeMillis()
+                val staleMs = if (lastLoop > 0) now - lastLoop else -1
+                
+                // 如果超过 30 秒没有更新，说明监控循环卡死了
+                if (lastLoop > 0 && staleMs > 30_000) {
+                    AppLogger.e("[WATCHDOG] 监控循环疑似卡死！上次更新: ${staleMs}ms前, 总cycles: $cycleCount")
+                    Log.e(TAG, "[WATCHDOG] 监控循环疑似卡死！stale=${staleMs}ms, cycles=$cycleCount")
+                    // 尝试重启服务
+                    try {
+                        AppMonitorService.stop(context)
+                        Thread.sleep(500)
+                        AppMonitorService.start(context)
+                        AppLogger.i("[WATCHDOG] 已重启服务")
+                    } catch (e: Exception) {
+                        AppLogger.e("[WATCHDOG] 重启服务失败", e)
+                    }
+                } else {
+                    AppLogger.d("[WATCHDOG] 监控循环正常: cycle=$cycleCount, stale=${staleMs}ms")
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "心跳处理异常", e)

@@ -39,6 +39,14 @@ class AppMonitorService : Service() {
         var isServiceRunning = false
             private set
         
+        // 监控循环健康检测标记
+        @Volatile
+        var lastMonitorLoopTimeMs = 0L
+            private set
+        @Volatile
+        var monitorLoopCycleCount = 0L
+            private set
+        
         fun start(context: Context) {
             val intent = Intent(context, AppMonitorService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -563,11 +571,19 @@ class AppMonitorService : Service() {
     private fun startMonitoring() {
         monitorJob = serviceScope.launch {
             Log.i(TAG, "App监控服务启动")
+            AppLogger.i("[WATCHDOG] 监控循环已启动")
             var wakelockRenewCounter = 0
             
             while (isActive) {
                 try {
                     checkCurrentApp()
+                    
+                    // 更新健康检测标记
+                    lastMonitorLoopTimeMs = System.currentTimeMillis()
+                    monitorLoopCycleCount++
+                    if (monitorLoopCycleCount % 30 == 0L) { // 每60秒打一次日志
+                        AppLogger.i("[WATCHDOG] 监控循环运行中: cycle=$monitorLoopCycleCount, last=${lastMonitorLoopTimeMs}")
+                    }
                     
                     // 每 5 分钟续期一次 WakeLock（在超时前续上）
                     wakelockRenewCounter++
@@ -577,11 +593,24 @@ class AppMonitorService : Service() {
                     }
                     
                     delay(CHECK_INTERVAL_MS)
+                } catch (e: CancellationException) {
+                    // 协程被取消，记录并退出
+                    AppLogger.e("[WATCHDOG] 监控循环被取消！", e)
+                    throw e
                 } catch (e: Exception) {
-                    Log.e(TAG, "监控异常", e)
+                    AppLogger.e("[WATCHDOG] 监控异常，继续运行: ${e.message}", e)
+                    lastMonitorLoopTimeMs = System.currentTimeMillis()
                     delay(CHECK_INTERVAL_MS)
                 }
             }
+            
+            // 如果 while 退出了（isActive = false），记录
+            AppLogger.e("[WATCHDOG] 监控循环正常退出！isActive=false")
+        }
+        
+        // 注册协程完成回调
+        monitorJob?.invokeOnCompletion { cause ->
+            AppLogger.e("[WATCHDOG] monitorJob 完成: cause=${cause?.message ?: "正常"}")
         }
     }
     
