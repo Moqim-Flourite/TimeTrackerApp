@@ -4,6 +4,19 @@
 
 ### 📝 更新日志
 
+#### v1.3.0 (2026-06-11)
+
+**新功能：**
+- 📝 日记分析链路 — 自动将每日时间记录拼接为结构化文本，调用 GPT-4o-mini 生成日报摘要+标签+分类
+- ⚙️ 设置页面 — 支持输入/保存/清除 OpenAI API Key，本地加密存储
+- 📅 按天日报卡片 — ReviewScreen 改为按天聚合，每天一张日报卡，往下滑看历史
+- 🔌 可插拔分析器 — 有 API Key 走真实 GPT 分析，无 Key 自动降级到 stub，零配置可用
+
+**技术：**
+- 接入 OkHttp + OpenAI Chat Completions API
+- EncryptedSharedPreferences 安全存储 API Key（加密不可用时自动降级）
+- DiaryTextBuilder 跨日分摊 + PackageManager 应用名解析
+
 #### v1.2.0 (2026-06-01)
 
 **新功能：**
