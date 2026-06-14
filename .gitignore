@@ -22,3 +22,6 @@ release-key.jks
 *.idsig
 .gradle-home/
 .gradle-home/
+.android_debug/
+.kotlin/
+*.bak

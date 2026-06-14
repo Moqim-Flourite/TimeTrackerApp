@@ -11,8 +11,8 @@ android {
         applicationId = "com.operit.timetracker"
         minSdk = 24
         targetSdk = 35
-        versionCode = 6
-        versionName = "1.3.0"
+        versionCode = 7
+        versionName = "1.4.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -84,6 +84,7 @@ dependencies {
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
+    implementation(libs.androidx.material.icons.extended)
     implementation("androidx.compose.material:material-icons-core")
     
     // Navigation Compose
@@ -96,8 +97,10 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
     
-    // 网络请求（OpenAI API）
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // 网络请求（OpenAI API + 同步）
+    implementation(libs.okhttp)
+    // WorkManager 定时同步
+    implementation(libs.androidx.work.runtime.ktx)
     // 加密存储（API key）
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     
