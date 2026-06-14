@@ -23,6 +23,10 @@ import java.net.URL
  * 1. 请求 GitHub API 获取最新 Release
  * 2. 比较 tag_name（版本号）与当前 App 版本
  * 3. 如果有新版本，下载 APK 并触发安装
+ *
+ * 注意：
+ * - GitHub API 未认证限速 60 次/小时，建议配置 token
+ * - ghproxy 等镜像仅用于文件下载，不适用于 API 请求
  */
 class UpdateChecker(private val context: Context) {
 
@@ -32,10 +36,17 @@ class UpdateChecker(private val context: Context) {
         const val GITHUB_REPO = "TimeTrackerApp"
         private const val API_URL =
             "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases/latest"
-        // 国内镜像备选（如果 GitHub API 超时）
-        private const val API_URL_MIRROR =
-            "https://ghproxy.com/https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases/latest"
         private const val MAX_REDIRECTS = 5
+
+        // GitHub 镜像列表，仅用于 APK 下载（API 请求不用镜像）
+        private val DOWNLOAD_MIRRORS = listOf(
+            "https://ghfast.top/",
+            "https://ghproxy.net/",
+            "https://mirror.ghproxy.com/",
+            "https://gh-proxy.com/",
+            "https://hub.gitmirror.com/",
+            "https://github.moeyy.xyz/",
+        )
     }
 
     data class UpdateInfo(
@@ -47,6 +58,18 @@ class UpdateChecker(private val context: Context) {
         val publishedAt: String
     )
 
+    /**
+     * 检查结果：区分"无更新"和"检查失败"
+     */
+    sealed class CheckResult {
+        /** 有新版本可用 */
+        data class HasUpdate(val info: UpdateInfo) : CheckResult()
+        /** 已是最新版本 */
+        object UpToDate : CheckResult()
+        /** 检查失败（网络错误、API 限速等） */
+        data class Error(val message: String, val exception: Exception? = null) : CheckResult()
+    }
+
     fun getCurrentVersion(): String {
         return try {
             val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
@@ -56,6 +79,10 @@ class UpdateChecker(private val context: Context) {
         }
     }
 
+    /**
+     * 比较两个版本号
+     * @return 正数表示 remote 更新，负数表示 local 更新，0 表示相同
+     */
     fun compareVersions(local: String, remote: String): Int {
         val cleanLocal = local.removePrefix("v").removePrefix("V")
         val cleanRemote = remote.removePrefix("v").removePrefix("V")
@@ -71,20 +98,13 @@ class UpdateChecker(private val context: Context) {
     }
 
     /**
-     * 检查是否有新版本
+     * 检查是否有新版本（新版本，返回 CheckResult）
      */
-    suspend fun checkForUpdate(): Result<UpdateInfo?> = withContext(Dispatchers.IO) {
+    suspend fun checkForResult(): CheckResult = withContext(Dispatchers.IO) {
         try {
             Log.i(TAG, "检查更新: $API_URL")
-            
-            // 尝试主 URL，失败则用镜像
-            val body = try {
-                fetchUrl(API_URL)
-            } catch (e: Exception) {
-                Log.w(TAG, "GitHub API 主地址失败，尝试镜像: ${e.message}")
-                fetchUrl(API_URL_MIRROR)
-            }
 
+            val body = fetchUrlWithAuth(API_URL)
             val json = org.json.JSONObject(body)
             val tagName = json.getString("tag_name")
             val releaseName = json.optString("name", tagName)
@@ -107,7 +127,7 @@ class UpdateChecker(private val context: Context) {
 
             if (apkUrl.isEmpty()) {
                 Log.w(TAG, "Release 中没有找到 APK 文件")
-                return@withContext Result.failure(Exception("Release 中没有 APK 文件"))
+                return@withContext CheckResult.Error("Release 中没有 APK 文件")
             }
 
             val updateInfo = UpdateInfo(
@@ -120,22 +140,66 @@ class UpdateChecker(private val context: Context) {
             )
 
             val currentVersion = getCurrentVersion()
-            val hasUpdate = compareVersions(currentVersion, tagName) > 0
-            Log.i(TAG, "当前=$currentVersion, 最新=$tagName, 有更新=$hasUpdate")
+            val comparison = compareVersions(currentVersion, tagName)
+            Log.i(TAG, "当前=$currentVersion, 最新=$tagName, 比较=$comparison")
 
-            if (hasUpdate) {
-                Result.success(updateInfo)
+            if (comparison > 0) {
+                CheckResult.HasUpdate(updateInfo)
             } else {
-                Result.success(null)
+                CheckResult.UpToDate
             }
         } catch (e: Exception) {
             Log.e(TAG, "检查更新失败", e)
-            Result.failure(e)
+            val msg = when {
+                e.message?.contains("403") == true -> "API 请求次数超限，请稍后再试"
+                e.message?.contains("timeout", true) == true -> "网络超时，请检查网络连接"
+                e.message?.contains("resolve", true) == true -> "无法连接到 GitHub，请检查网络"
+                else -> "检查更新失败: ${e.message}"
+            }
+            CheckResult.Error(msg, e)
         }
     }
 
     /**
-     * 下载 APK 到外部缓存目录
+     * 兼容旧接口
+     */
+    suspend fun checkForUpdate(): Result<UpdateInfo?> {
+        return when (val result = checkForResult()) {
+            is CheckResult.HasUpdate -> Result.success(result.info)
+            is CheckResult.UpToDate -> Result.success(null)
+            is CheckResult.Error -> Result.failure(result.exception ?: Exception(result.message))
+        }
+    }
+
+    /**
+     * 请求 URL 并返回响应体文本，自动带上 auth header 提升 API 配额
+     */
+    private fun fetchUrlWithAuth(urlString: String): String {
+        val headers = mutableMapOf(
+            "Accept" to "application/vnd.github.v3+json"
+        )
+        // 尝试从 SharedPreferences 读取 GitHub token
+        val prefs = context.getSharedPreferences("sync_config", Context.MODE_PRIVATE)
+        val token = prefs.getString("github_token", null)
+        if (!token.isNullOrBlank()) {
+            headers["Authorization"] = "token $token"
+        }
+        val conn = openConnection(URL(urlString), "GET", headers)
+
+        val responseCode = conn.responseCode
+        if (responseCode != 200) {
+            val errorStream = conn.errorStream?.bufferedReader()?.readText() ?: ""
+            conn.disconnect()
+            throw Exception("HTTP $responseCode: $errorStream")
+        }
+
+        val body = conn.inputStream.bufferedReader().use(BufferedReader::readText)
+        conn.disconnect()
+        return body
+    }
+
+    /**
+     * 下载 APK，优先用镜像加速（国内网络）
      */
     suspend fun downloadApk(
         updateInfo: UpdateInfo,
@@ -148,7 +212,7 @@ class UpdateChecker(private val context: Context) {
             )
             if (!dir.exists()) dir.mkdirs()
 
-            // 先清理旧版本 APK（不同文件名的）
+            // 清理旧版本 APK
             dir.listFiles()?.forEach { file ->
                 if (file.name.endsWith(".apk") && file.name != updateInfo.apkFileName) {
                     file.delete()
@@ -158,13 +222,13 @@ class UpdateChecker(private val context: Context) {
 
             val apkFile = File(dir, updateInfo.apkFileName)
 
-            // 如果已下载过同名文件，用 HEAD 请求比对大小，更准确
+            // 如果已下载过同名文件，用 HEAD 请求比对大小
             if (apkFile.exists() && apkFile.length() > 100_000) {
                 try {
                     val headConn = openConnection(URL(updateInfo.apkDownloadUrl), "HEAD")
                     val remoteSize = headConn.contentLength.toLong()
                     headConn.disconnect()
-                    
+
                     if (remoteSize > 0 && apkFile.length() == remoteSize) {
                         Log.i(TAG, "APK 已存在且大小匹配 (${apkFile.length()} bytes)，跳过下载")
                         return@withContext Result.success(apkFile)
@@ -173,50 +237,52 @@ class UpdateChecker(private val context: Context) {
                         apkFile.delete()
                     }
                 } catch (e: Exception) {
-                    // HEAD 请求失败，保守起见直接用缓存
                     Log.w(TAG, "HEAD 请求失败，使用缓存: ${e.message}")
                     return@withContext Result.success(apkFile)
                 }
             }
 
-            Log.i(TAG, "开始下载: ${updateInfo.apkDownloadUrl}")
-            val conn = openConnection(URL(updateInfo.apkDownloadUrl), "GET")
-
-            val responseCode = conn.responseCode
-            if (responseCode != 200) {
-                conn.disconnect()
-                return@withContext Result.failure(Exception("下载失败: HTTP $responseCode"))
+            // 尝试主 URL，失败则逐个尝试镜像
+            val urls = mutableListOf(updateInfo.apkDownloadUrl)
+            if (updateInfo.apkDownloadUrl.contains("github.com")) {
+                for (mirror in DOWNLOAD_MIRRORS) {
+                    urls.add(mirror + updateInfo.apkDownloadUrl)
+                }
             }
 
-            return@withContext downloadFromConnection(conn, apkFile, onProgress)
+            var lastException: Exception? = null
+            for (url in urls) {
+                try {
+                    Log.i(TAG, "尝试下载: $url")
+                    val conn = openConnection(URL(url), "GET")
+                    val responseCode = conn.responseCode
+                    if (responseCode != 200) {
+                        conn.disconnect()
+                        lastException = Exception("HTTP $responseCode from $url")
+                        continue
+                    }
+                    return@withContext downloadFromConnection(conn, apkFile, onProgress)
+                } catch (e: Exception) {
+                    Log.w(TAG, "下载失败 $url: ${e.message}")
+                    lastException = e
+                }
+            }
+
+            Result.failure(lastException ?: Exception("所有下载源均失败"))
         } catch (e: Exception) {
             Log.e(TAG, "下载 APK 失败", e)
             Result.failure(e)
         }
     }
-    
-    /**
-     * 请求 URL 并返回响应体文本
-     */
-    private fun fetchUrl(urlString: String): String {
-        val conn = openConnection(URL(urlString), "GET", mapOf("Accept" to "application/vnd.github.v3+json"))
-        
-        val responseCode = conn.responseCode
-        if (responseCode != 200) {
-            val errorStream = conn.errorStream?.bufferedReader()?.readText() ?: ""
-            conn.disconnect()
-            throw Exception("HTTP $responseCode: $errorStream")
-        }
-        
-        val body = conn.inputStream.bufferedReader().use(BufferedReader::readText)
-        conn.disconnect()
-        return body
-    }
 
     /**
-     * 打开 HTTP 连接，支持多级重定向（GitHub 下载经常 302 链式跳转）
+     * 打开 HTTP 连接，支持多级重定向
      */
-    private fun openConnection(url: URL, method: String, headers: Map<String, String> = emptyMap()): HttpURLConnection {
+    private fun openConnection(
+        url: URL,
+        method: String,
+        headers: Map<String, String> = emptyMap()
+    ): HttpURLConnection {
         var currentUrl = url
         var redirectCount = 0
 
@@ -229,7 +295,7 @@ class UpdateChecker(private val context: Context) {
             }
             conn.connectTimeout = 15000
             conn.readTimeout = 60000
-            conn.instanceFollowRedirects = false // 手动处理重定向
+            conn.instanceFollowRedirects = false
 
             val code = conn.responseCode
             if (code in 301..308) {
@@ -270,7 +336,6 @@ class UpdateChecker(private val context: Context) {
         }
         conn.disconnect()
 
-        // 验证下载完整性
         if (totalSize > 0 && apkFile.length() != totalSize.toLong()) {
             apkFile.delete()
             return Result.failure(
@@ -283,7 +348,7 @@ class UpdateChecker(private val context: Context) {
     }
 
     /**
-     * 安装 APK（触发系统安装界面）
+     * 安装 APK
      */
     fun installApk(apkFile: File) {
         try {

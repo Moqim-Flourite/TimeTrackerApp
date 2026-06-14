@@ -64,16 +64,12 @@ fun MainScreen(viewModel: TaskViewModel, mainViewModel: MainViewModel, navContro
     
     // 启动时自动检查更新（静默，失败不弹提示）
     LaunchedEffect(Unit) {
-        try {
-            val result = updateChecker.checkForUpdate()
-            result.onSuccess { info ->
-                if (info != null) {
-                    updateInfo = info
-                    showUpdateDialog = true
-                }
+        when (val result = updateChecker.checkForResult()) {
+            is UpdateChecker.CheckResult.HasUpdate -> {
+                updateInfo = result.info
+                showUpdateDialog = true
             }
-        } catch (_: Exception) {
-            // 静默失败
+            else -> { /* UpToDate 或 Error 都静默 */ }
         }
     }
     
@@ -104,18 +100,21 @@ fun MainScreen(viewModel: TaskViewModel, mainViewModel: MainViewModel, navContro
                                 isCheckingUpdate = true
                                 updateError = null
                                 coroutineScope.launch {
-                                    val result = updateChecker.checkForUpdate()
-                                    isCheckingUpdate = false
-                                    result.onSuccess { info ->
-                                        if (info != null) {
-                                            updateInfo = info
+                                    when (val result = updateChecker.checkForResult()) {
+                                        is UpdateChecker.CheckResult.HasUpdate -> {
+                                            isCheckingUpdate = false
+                                            updateInfo = result.info
                                             showUpdateDialog = true
-                                        } else {
+                                        }
+                                        is UpdateChecker.CheckResult.UpToDate -> {
+                                            isCheckingUpdate = false
                                             viewModel.setMessage("✅ 已是最新版本 v${updateChecker.getCurrentVersion()}")
                                         }
-                                    }.onFailure { e ->
-                                        updateError = e.message
-                                        viewModel.setMessage("网络异常，检查更新失败，稍后再试")
+                                        is UpdateChecker.CheckResult.Error -> {
+                                            isCheckingUpdate = false
+                                            updateError = result.message
+                                            viewModel.setMessage("❌ ${result.message}")
+                                        }
                                     }
                                 }
                             }
