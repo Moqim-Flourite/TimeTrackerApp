@@ -56,10 +56,11 @@ class MainActivity : ComponentActivity() {
                 AppLogger.i("MainActivity onResume: 触发补检测")
             }
             
-            // 首次打开时检查电池优化白名单
+            // 首次打开时检查电池优化白名单和通知权限
             if (!hasCheckedBatteryOptimization) {
                 hasCheckedBatteryOptimization = true
                 checkBatteryOptimization()
+                checkNotificationPermission()
             }
         } catch (e: Exception) {
             android.util.Log.e("MainActivity", "onResume检查失败", e)
@@ -105,6 +106,66 @@ class MainActivity : ComponentActivity() {
                 startActivity(intent)
             } catch (e: Exception) {
                 AppLogger.e("跳转电池优化设置失败", e)
+                // 降级：跳转到应用详情页
+                try {
+                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                } catch (e2: Exception) {
+                    AppLogger.e("跳转应用详情页也失败", e2)
+                }
+            }
+        }
+        builder.setNegativeButton("稍后再说") { dialog, _ ->
+            dialog.dismiss()
+        }
+        builder.setCancelable(true)
+        builder.show()
+    }
+    
+    /**
+     * 检查通知权限是否被禁用
+     * HyperOS 会自动禁用后台 App 的通知
+     */
+    private fun checkNotificationPermission() {
+        try {
+            val notificationManager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+            
+            // 检查通知总开关
+            if (!notificationManager.areNotificationsEnabled()) {
+                AppLogger.w("通知权限: 通知总开关已关闭")
+                showNotificationPermissionDialog()
+                return
+            }
+            
+            // 检查通知渠道
+            val channel = notificationManager.getNotificationChannel("app_monitor_channel")
+            if (channel != null && channel.importance == android.app.NotificationManager.IMPORTANCE_NONE) {
+                AppLogger.w("通知权限: 通知渠道被禁用")
+                showNotificationPermissionDialog()
+                return
+            }
+            
+            AppLogger.i("通知权限: 正常")
+        } catch (e: Exception) {
+            AppLogger.e("检查通知权限失败", e)
+        }
+    }
+    
+    private fun showNotificationPermissionDialog() {
+        val builder = android.app.AlertDialog.Builder(this)
+        builder.setTitle("通知权限被关闭")
+        builder.setMessage("时间记录助手需要通知权限来显示实时记录状态。\n\n" +
+                "HyperOS 可能已自动关闭通知。请点击\"前往设置\"，开启通知权限。")
+        builder.setPositiveButton("前往设置") { _, _ ->
+            try {
+                val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                    putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                }
+                startActivity(intent)
+            } catch (e: Exception) {
+                AppLogger.e("跳转通知设置失败", e)
                 // 降级：跳转到应用详情页
                 try {
                     val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
