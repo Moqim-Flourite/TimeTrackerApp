@@ -15,9 +15,19 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.operit.timetracker.R
 import com.operit.timetracker.data.DataStore
+import com.operit.timetracker.data.RecordType
 import com.operit.timetracker.data.TimeRecord
 import kotlinx.coroutines.*
 import java.io.File
+
+/**
+ * 活跃 App 信息
+ */
+data class ActiveApp(
+    val packageName: String,
+    val type: RecordType,
+    val lastActiveTime: Long = System.currentTimeMillis()
+)
 
 class AppMonitorService : Service() {
     
@@ -663,72 +673,53 @@ class AppMonitorService : Service() {
             }
         }
         
-        // 获取当前前台App
-        val currentPackage = getCurrentForegroundApp()
-        AppLogger.i("前台App: ${currentPackage ?: "null"}")
+        // 获取所有活跃 App（前台 + 小窗 + 后台前台服务）
+        val activeApps = getActiveApps()
         
-        if (currentPackage != null) {
-            currentForegroundPackage = currentPackage
-            currentForegroundAppName = getAppName(currentPackage)
-            AppLogger.i("App名称: $currentForegroundAppName")
+        if (activeApps.isNotEmpty()) {
+            // 找到主 app（最新的前台 app）
+            val primaryApp = activeApps.firstOrNull { it.type == RecordType.PRIMARY }
+            // 找到伴随 app（后台前台服务）
+            val companionApps = activeApps.filter { it.type == RecordType.COMPANION }
+            // 找到辅助 app（小窗）
+            val auxiliaryApps = activeApps.filter { it.type == RecordType.AUXILIARY }
             
-            // 检查分类是否需要忽略（null = 忽略）
-            val category = mapPackageToCategory(currentPackage)
-            if (category == null) {
-                AppLogger.d("忽略App: $currentPackage ($currentForegroundAppName)")
-                // 停止当前任务（用户已离开上一个 app）
-                val currentTask = dataStore.loadCurrentTask()
-                if (currentTask != null && currentTask.originalInput != IDLE_PACKAGE) {
-                    AppLogger.i("用户进入忽略App，停止当前任务: ${currentTask.category}")
-                    stopCurrentTask(currentTask)
-                }
-                return
-            }
+            AppLogger.i("活跃App: 主=${primaryApp?.packageName ?: "无"}, 伴随=${companionApps.size}, 辅助=${auxiliaryApps.size}")
             
-            // 获取当前记录的任务
-            val currentTask = dataStore.loadCurrentTask()
-            AppLogger.i("当前任务: ${currentTask?.category ?: "null"} (ID: ${currentTask?.id ?: "null"})")
-            AppLogger.i("当前任务包名: ${currentTask?.originalInput ?: "null"}")
-            
-            // 如果当前没有任务，或者任务类别不同，则切换任务
-            if (currentTask == null || currentTask.originalInput != currentPackage) {
-                // 检查辅助应用白名单：当前活动下的辅助应用不触发切换
-                if (currentTask != null && isAssistantApp(currentTask.category, currentPackage)) {
-                    AppLogger.d("辅助应用，不切换: $currentPackage (当前: ${currentTask.category})")
-                    return
-                }
-                
-                AppLogger.i("需要切换任务!")
-                // 停止当前任务
-                if (currentTask != null) {
-                    AppLogger.i("停止旧任务: ${currentTask.category}")
-                    stopCurrentTask(currentTask)
-                }
-                
-                // 开始新任务
-                val category = mapPackageToCategory(currentPackage)
-                AppLogger.i("开始新任务: $category ($currentPackage)")
-                if (category != null) {
-                    // 检查乌龙任务（刚停止的任务是否太短且相似）
-                    checkAndCleanOolongTask(category)
-                    startNewTask(category, currentPackage)
-                } else {
-                    AppLogger.d("分类为null，跳过: $currentPackage")
-                }
+            // 处理主 app
+            if (primaryApp != null) {
+                handlePrimaryApp(primaryApp.packageName)
             } else {
-                AppLogger.d("任务未变化，继续监控")
+                // 没有主 app，可能是屏幕亮着但 API 被过滤
+                val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+                if (pm.isInteractive) {
+                    AppLogger.w("屏幕亮着但获取不到主App，可能是API被HyperOS过滤")
+                } else {
+                    handleScreenState()
+                }
             }
-        } else {
-            // 无法获取前台App
-            AppLogger.w("无法获取前台App")
             
-            // 检查屏幕状态：如果屏幕亮着但获取不到前台App，可能是API被系统过滤
-            // 这种情况下不要切换到空闲状态，等待下一次检测
+            // 处理伴随 app（后台前台服务）
+            for (companionApp in companionApps) {
+                handleCompanionApp(companionApp.packageName)
+            }
+            
+            // 处理辅助 app（小窗）
+            for (auxiliaryApp in auxiliaryApps) {
+                handleAuxiliaryApp(auxiliaryApp.packageName)
+            }
+            
+            // 停止不再活跃的伴随/辅助任务
+            cleanupInactiveCompanionAndAuxiliary(activeApps)
+            
+        } else {
+            // 无法获取活跃 App
+            AppLogger.w("无法获取活跃App")
+            
             val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
             if (pm.isInteractive) {
-                AppLogger.w("屏幕亮着但获取不到前台App，可能是API被HyperOS过滤，等待下次检测")
+                AppLogger.w("屏幕亮着但获取不到活跃App，可能是API被HyperOS过滤")
             } else {
-                // 屏幕确实灭了，切换到空闲状态
                 handleScreenState()
             }
         }
@@ -739,6 +730,118 @@ class AppMonitorService : Service() {
             AppLogger.d("state.json内容: ${stateFile.readText()}")
         } catch (e: Exception) {
             AppLogger.e("读取state.json失败", e)
+        }
+    }
+    
+    /**
+     * 处理主 app（前台）
+     */
+    private fun handlePrimaryApp(packageName: String) {
+        currentForegroundPackage = packageName
+        currentForegroundAppName = getAppName(packageName)
+        
+        val category = mapPackageToCategory(packageName)
+        if (category == null) {
+            AppLogger.d("忽略App: $packageName ($currentForegroundAppName)")
+            val currentTask = dataStore.loadCurrentTask()
+            if (currentTask != null && currentTask.originalInput != IDLE_PACKAGE && currentTask.recordType == RecordType.PRIMARY) {
+                AppLogger.i("用户进入忽略App，停止当前主任务: ${currentTask.category}")
+                stopCurrentTask(currentTask)
+            }
+            return
+        }
+        
+        val currentTask = dataStore.loadCurrentTask()
+        
+        if (currentTask == null || currentTask.originalInput != packageName || currentTask.recordType != RecordType.PRIMARY) {
+            if (currentTask != null && isAssistantApp(currentTask.category, packageName)) {
+                AppLogger.d("辅助应用，不切换: $packageName (当前: ${currentTask.category})")
+                return
+            }
+            
+            AppLogger.i("需要切换主任务!")
+            if (currentTask != null && currentTask.recordType == RecordType.PRIMARY) {
+                AppLogger.i("停止旧主任务: ${currentTask.category}")
+                stopCurrentTask(currentTask)
+            }
+            
+            AppLogger.i("开始新主任务: $category ($packageName)")
+            checkAndCleanOolongTask(category)
+            startNewTask(category, packageName, RecordType.PRIMARY)
+        } else {
+            AppLogger.d("主任务未变化，继续监控")
+        }
+    }
+    
+    /**
+     * 处理伴随 app（后台前台服务，如音乐、导航）
+     */
+    private fun handleCompanionApp(packageName: String) {
+        val category = mapPackageToCategory(packageName) ?: return
+        
+        // 检查是否已经在记录
+        val records = dataStore.loadRecords()
+        val existingRecord = records.lastOrNull { 
+            it.originalInput == packageName && 
+            it.recordType == RecordType.COMPANION && 
+            it.endTime == null 
+        }
+        
+        if (existingRecord == null) {
+            AppLogger.i("开始伴随任务: $category ($packageName)")
+            startNewTask(category, packageName, RecordType.COMPANION)
+        } else {
+            AppLogger.d("伴随任务已存在: $category ($packageName)")
+        }
+    }
+    
+    /**
+     * 处理辅助 app（小窗）
+     */
+    private fun handleAuxiliaryApp(packageName: String) {
+        val category = mapPackageToCategory(packageName) ?: return
+        
+        // 检查是否已经在记录
+        val records = dataStore.loadRecords()
+        val existingRecord = records.lastOrNull { 
+            it.originalInput == packageName && 
+            it.recordType == RecordType.AUXILIARY && 
+            it.endTime == null 
+        }
+        
+        if (existingRecord == null) {
+            AppLogger.i("开始辅助任务: $category ($packageName)")
+            startNewTask(category, packageName, RecordType.AUXILIARY)
+        } else {
+            AppLogger.d("辅助任务已存在: $category ($packageName)")
+        }
+    }
+    
+    /**
+     * 清理不再活跃的伴随/辅助任务
+     */
+    private fun cleanupInactiveCompanionAndAuxiliary(activeApps: List<ActiveApp>) {
+        val records = dataStore.loadRecords()
+        val activePackageNames = activeApps.map { it.packageName }.toSet()
+        
+        // 停止不再活跃的伴随任务
+        records.filter { 
+            it.recordType == RecordType.COMPANION && 
+            it.endTime == null && 
+            it.originalInput !in activePackageNames 
+        }.forEach { record ->
+            AppLogger.i("停止不活跃的伴随任务: ${record.category} (${record.originalInput})")
+            stopCurrentTask(record)
+        }
+        
+        // 停止不再活跃的辅助任务
+        records.filter { 
+            it.recordType == RecordType.AUXILIARY && 
+            it.endTime == null && 
+            it.originalInput !in activePackageNames 
+        }.forEach { record ->
+            AppLogger.i("停止不活跃的辅助任务: ${record.category} (${record.originalInput})")
+            stopCurrentTask(record)
         }
     }
     
@@ -827,6 +930,94 @@ class AppMonitorService : Service() {
         } catch (e: Exception) {
             AppLogger.e("queryEvents 异常: ${e.message}")
             return null
+        }
+    }
+    
+    /**
+     * 获取所有活跃 App（前台 + 小窗 + 后台前台服务）
+     */
+    private fun getActiveApps(): List<ActiveApp> {
+        val endTime = System.currentTimeMillis()
+        val beginTime = endTime - 1000 * 120 // 2 分钟窗口
+        
+        try {
+            // 检查权限
+            val appOps = getSystemService(android.app.AppOpsManager::class.java)
+            val mode = appOps.unsafeCheckOpNoThrow(
+                android.app.AppOpsManager.OPSTR_GET_USAGE_STATS,
+                android.os.Process.myUid(),
+                packageName
+            )
+            if (mode != android.app.AppOpsManager.MODE_ALLOWED) {
+                AppLogger.e("UsageStats权限未授权！")
+                return emptyList()
+            }
+            
+            val usageEvents = usageStatsManager.queryEvents(beginTime, endTime)
+            val activeApps = mutableMapOf<String, ActiveApp>()
+            var eventCount = 0
+            
+            while (usageEvents.hasNextEvent()) {
+                val event = UsageEvents.Event()
+                usageEvents.getNextEvent(event)
+                eventCount++
+                
+                when (event.eventType) {
+                    // 前台/小窗 app
+                    UsageEvents.Event.ACTIVITY_RESUMED,
+                    UsageEvents.Event.MOVE_TO_FOREGROUND -> {
+                        // 跳过桌面和系统界面
+                        if (event.packageName == "com.miui.home" || 
+                            event.packageName == "com.android.systemui") {
+                            continue
+                        }
+                        // 跳过自己
+                        if (event.packageName == packageName) {
+                            continue
+                        }
+                        
+                        // 多个 ACTIVITY_RESUMED 可能表示小窗模式
+                        // 主 app 是最新的一個，其他的是小窗
+                        val existing = activeApps[event.packageName]
+                        if (existing == null || event.timeStamp > existing.lastActiveTime) {
+                            activeApps[event.packageName] = ActiveApp(
+                                packageName = event.packageName,
+                                type = RecordType.AUXILIARY, // 先标记为辅助，后面根据顺序调整
+                                lastActiveTime = event.timeStamp
+                            )
+                        }
+                    }
+                    // 后台前台服务
+                    UsageEvents.Event.FOREGROUND_SERVICE_START -> {
+                        // 跳过自己
+                        if (event.packageName == packageName) {
+                            continue
+                        }
+                        activeApps[event.packageName] = ActiveApp(
+                            packageName = event.packageName,
+                            type = RecordType.COMPANION,
+                            lastActiveTime = event.timeStamp
+                        )
+                    }
+                }
+            }
+            
+            AppLogger.i("getActiveApps: 共${eventCount}事件, 活跃App: ${activeApps.size}")
+            
+            // 按时间排序，最新的标记为 PRIMARY
+            val sortedApps = activeApps.values.sortedByDescending { it.lastActiveTime }
+            return sortedApps.mapIndexed { index, app ->
+                if (index == 0 && app.type == RecordType.AUXILIARY) {
+                    // 最新的一个是主 app
+                    app.copy(type = RecordType.PRIMARY)
+                } else {
+                    app
+                }
+            }
+            
+        } catch (e: Exception) {
+            AppLogger.e("getActiveApps 异常: ${e.message}")
+            return emptyList()
         }
     }
     
@@ -929,8 +1120,8 @@ class AppMonitorService : Service() {
         return result
     }
     
-    private fun startNewTask(category: String, packageName: String) {
-        AppLogger.i(">>> startNewTask: category=$category, pkg=$packageName")
+    private fun startNewTask(category: String, packageName: String, recordType: RecordType = RecordType.PRIMARY) {
+        AppLogger.i(">>> startNewTask: category=$category, pkg=$packageName, type=$recordType")
         
         val now = System.currentTimeMillis()
         val record = TimeRecord(
@@ -940,20 +1131,24 @@ class AppMonitorService : Service() {
             endTime = null,
             durationSeconds = 0,
             originalInput = packageName,
+            recordType = recordType,
             createdAt = now
         )
         
         val saved = dataStore.addRecord(record)
         AppLogger.i("记录已保存: id=${saved.id}")
         
-        dataStore.saveCurrentTask(saved)
-        AppLogger.i("当前任务已保存到state.json")
+        // 只保存主任务到 state.json（向后兼容）
+        if (recordType == RecordType.PRIMARY) {
+            dataStore.saveCurrentTask(saved)
+            AppLogger.i("主任务已保存到state.json")
+        }
         
         // 立即更新通知
         mainHandler.post { updateNotification() }
         AppLogger.i("通知已更新")
         
-        Log.i(TAG, "自动开始任务: $category ($packageName)")
+        Log.i(TAG, "自动开始任务: $category ($packageName) [${recordType.name}]")
     }
     
     private fun stopCurrentTask(task: TimeRecord) {

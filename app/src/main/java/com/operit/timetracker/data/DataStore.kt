@@ -41,7 +41,12 @@ class DataStore(context: Context) {
                         endTime = if (obj.isNull("endTime")) null else obj.getLong("endTime"),
                         durationSeconds = obj.getLong("durationSeconds"),
                         originalInput = obj.optString("originalInput", ""),
-                        createdAt = obj.optLong("createdAt", System.currentTimeMillis())
+                        createdAt = obj.optLong("createdAt", System.currentTimeMillis()),
+                        recordType = try {
+                            RecordType.valueOf(obj.optString("recordType", "PRIMARY"))
+                        } catch (e: Exception) {
+                            RecordType.PRIMARY
+                        }
                     )
                 )
             }
@@ -62,6 +67,7 @@ class DataStore(context: Context) {
                 put("durationSeconds", record.durationSeconds)
                 put("originalInput", record.originalInput)
                 put("createdAt", record.createdAt)
+                put("recordType", record.recordType.name)
             }
             array.put(obj)
         }
@@ -102,6 +108,7 @@ class DataStore(context: Context) {
                 put("startTime", record.startTime)
                 put("originalInput", record.originalInput)
                 put("createdAt", record.createdAt)
+                put("recordType", record.recordType.name)
             }
         } else {
             JSONObject.NULL
@@ -122,7 +129,12 @@ class DataStore(context: Context) {
                 category = obj.getString("category"),
                 startTime = obj.getLong("startTime"),
                 originalInput = obj.optString("originalInput", ""),
-                createdAt = obj.optLong("createdAt", System.currentTimeMillis())
+                createdAt = obj.optLong("createdAt", System.currentTimeMillis()),
+                recordType = try {
+                    RecordType.valueOf(obj.optString("recordType", "PRIMARY"))
+                } catch (e: Exception) {
+                    RecordType.PRIMARY
+                }
             )
         } catch (e: Exception) {
             null
