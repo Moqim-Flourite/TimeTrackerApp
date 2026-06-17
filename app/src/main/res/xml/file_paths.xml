@@ -2,5 +2,14 @@
 <paths>
     <external-files-path
         name="updates"
-        path="Downloads/updates/" />
+        path="Download/updates/" />
+    <files-path
+        name="internal_updates"
+        path="updates/" />
+    <cache-path
+        name="cache_updates"
+        path="updates/" />
+    <external-path
+        name="external"
+        path="." />
 </paths>
