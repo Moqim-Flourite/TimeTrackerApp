@@ -10,7 +10,6 @@ import com.operit.timetracker.ui.screens.LogScreen
 import com.operit.timetracker.ui.screens.MainScreen
 import com.operit.timetracker.ui.screens.StatsScreen
 import com.operit.timetracker.ui.screens.HistoryScreen
-import com.operit.timetracker.ui.screens.ReviewScreen
 import com.operit.timetracker.ui.screens.SettingsScreen
 import com.operit.timetracker.ui.viewmodel.TaskViewModel
 
@@ -36,10 +35,6 @@ fun AppNavigation(viewModel: TaskViewModel, mainViewModel: MainViewModel) {
         
         composable("log") {
             LogScreen(navController = navController)
-        }
-        
-        composable("diary") {
-            ReviewScreen(navController = navController)
         }
         
         composable("settings") {
