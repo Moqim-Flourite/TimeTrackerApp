@@ -97,12 +97,10 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
     
-    // 网络请求（OpenAI API + 同步）
+    // 网络请求（同步）
     implementation(libs.okhttp)
     // WorkManager 定时同步
     implementation(libs.androidx.work.runtime.ktx)
-    // 加密存储（API key）
-    implementation("androidx.security:security-crypto:1.1.0-alpha06")
     
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
