@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.util.Log
 import com.operit.timetracker.data.DataStore
+import com.operit.timetracker.data.TimeRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -149,7 +150,7 @@ class SyncRepository(private val context: Context) {
             onProgress?.invoke(index + 1, unsyncedDates.size, dateStr)
 
             try {
-                val success = uploadDayData(baseUrl, dateStr)
+                val success = syncDayData(baseUrl, dateStr)
                 if (success) {
                     logStore.markSynced(dateStr)
                     syncedDates.add(dateStr)
@@ -198,18 +199,179 @@ class SyncRepository(private val context: Context) {
     }
 
     /**
-     * 上传某天的数据到服务器
+     * 同步某天的数据（下载 → 合并 → 上传）
      *
-     * JSON 格式：
-     * {
-     *   "date": "2026-06-13",
-     *   "syncedAt": 1718284800000,
-     *   "records": [...],
-     *   "summary": { "category": totalSeconds, ... }
-     * }
+     * 核心修复：先下载服务器数据，与本地数据合并后再上传，
+     * 避免本地旧数据覆盖服务器新数据。
      */
-    private fun uploadDayData(baseUrl: String, dateStr: String): Boolean {
-        val dayData = packageDayData(dateStr)
+    private fun syncDayData(baseUrl: String, dateStr: String): Boolean {
+        // 1. 获取本地当天记录
+        val localRecords = getDayRecords(dateStr)
+
+        // 2. 尝试下载服务器上的当天数据
+        val serverRecords = downloadDayData(baseUrl, dateStr)
+
+        // 3. 如果服务器支持下载，合并后再上传；否则只上传本地数据
+        val recordsToUpload = if (serverRecords != null) {
+            Log.i(TAG, "合并模式: 本地 ${localRecords.size} 条, 服务器 ${serverRecords.size} 条")
+            mergeRecords(localRecords, serverRecords)
+        } else {
+            Log.i(TAG, "直传模式: 本地 ${localRecords.size} 条")
+            localRecords
+        }
+
+        // 4. 上传
+        return uploadRecords(baseUrl, dateStr, recordsToUpload)
+    }
+
+    /**
+     * 获取本地某天的记录（含跨日分摊）
+     */
+    private fun getDayRecords(dateStr: String): List<TimeRecord> {
+        val records = dataStore.loadRecords()
+        val dayStart = dateFormat.parse(dateStr)?.time ?: 0
+        val dayEnd = dayStart + 24 * 60 * 60 * 1000L
+
+        return records.filter { record ->
+            record.startTime < dayEnd && (record.endTime ?: System.currentTimeMillis()) > dayStart
+        }.mapNotNull { record ->
+            val effectiveStart = maxOf(record.startTime, dayStart)
+            val effectiveEnd = minOf(record.endTime ?: System.currentTimeMillis(), dayEnd)
+            val effectiveDuration = (effectiveEnd - effectiveStart) / 1000
+
+            if (effectiveDuration <= 0) return@mapNotNull null
+
+            record.copy(
+                startTime = effectiveStart,
+                endTime = effectiveEnd,
+                durationSeconds = effectiveDuration
+            )
+        }
+    }
+
+    /**
+     * 下载服务器上某天的数据
+     *
+     * @return 服务器记录列表；如果服务器不支持下载返回 null（降级为直传）
+     */
+    private fun downloadDayData(baseUrl: String, dateStr: String): List<TimeRecord>? {
+        val request = Request.Builder()
+            .url("$baseUrl$SYNC_DATA_ENDPOINT")
+            .get()
+            .addHeader("Authorization", "Bearer ${config.authToken}")
+            .addHeader("X-Date", dateStr)
+            .build()
+
+        return try {
+            val response = client.newCall(request).execute()
+            if (response.isSuccessful) {
+                val body = response.body?.string()
+                response.close()
+                if (body.isNullOrBlank()) return emptyList()
+                parseServerRecords(body)
+            } else {
+                response.close()
+                Log.w(TAG, "服务器不支持下载 (HTTP ${response.code}), 降级为直传")
+                null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "下载服务器数据失败: $dateStr, 降级为直传", e)
+            null
+        }
+    }
+
+    /**
+     * 解析服务器返回的记录 JSON
+     */
+    private fun parseServerRecords(json: String): List<TimeRecord> {
+        return try {
+            val obj = JSONObject(json)
+            val array = obj.optJSONArray("records")
+            if (array != null) return parseRecordsArray(array)
+
+            // 兼容直接返回数组的情况
+            val directArray = JSONArray(json)
+            parseRecordsArray(directArray)
+        } catch (e: Exception) {
+            Log.w(TAG, "解析服务器记录失败", e)
+            emptyList()
+        }
+    }
+
+    private fun parseRecordsArray(array: JSONArray): List<TimeRecord> {
+        val records = mutableListOf<TimeRecord>()
+        for (i in 0 until array.length()) {
+            val obj = array.getJSONObject(i)
+            records.add(
+                TimeRecord(
+                    id = obj.optLong("id", 0),
+                    category = obj.getString("category"),
+                    startTime = obj.getLong("startTime"),
+                    endTime = if (obj.isNull("endTime")) null else obj.getLong("endTime"),
+                    durationSeconds = obj.getLong("durationSeconds"),
+                    originalInput = obj.optString("originalInput", ""),
+                    createdAt = obj.optLong("createdAt", System.currentTimeMillis())
+                )
+            )
+        }
+        return records
+    }
+
+    /**
+     * 合并本地和服务器记录
+     *
+     * 匹配规则：startTime + category 相同视为同一条记录
+     * 冲突解决：保留 createdAt 更新的记录
+     * 未匹配记录：两侧独有的一律保留
+     */
+    private fun mergeRecords(
+        localRecords: List<TimeRecord>,
+        serverRecords: List<TimeRecord>
+    ): List<TimeRecord> {
+        val merged = mutableListOf<TimeRecord>()
+        val serverMap = mutableMapOf<String, TimeRecord>()
+
+        for (record in serverRecords) {
+            val key = "${record.startTime}-${record.category}"
+            serverMap[key] = record
+        }
+
+        val matchedKeys = mutableSetOf<String>()
+        for (local in localRecords) {
+            val key = "${local.startTime}-${local.category}"
+            val server = serverMap[key]
+
+            if (server != null) {
+                matchedKeys.add(key)
+                // 保留 createdAt 更新的
+                if (local.createdAt >= server.createdAt) {
+                    merged.add(local)
+                } else {
+                    merged.add(server)
+                }
+            } else {
+                merged.add(local)
+            }
+        }
+
+        // 添加服务器独有的记录
+        for ((key, server) in serverMap) {
+            if (key !in matchedKeys) {
+                merged.add(server)
+            }
+        }
+
+        // 按 startTime 排序并重新分配 ID
+        return merged.sortedBy { it.startTime }.mapIndexed { index, record ->
+            record.copy(id = (index + 1).toLong())
+        }
+    }
+
+    /**
+     * 上传记录到服务器
+     */
+    private fun uploadRecords(baseUrl: String, dateStr: String, records: List<TimeRecord>): Boolean {
+        val dayData = packageRecords(dateStr, records)
         val jsonBody = dayData.toString(2)
 
         val request = Request.Builder()
@@ -229,43 +391,25 @@ class SyncRepository(private val context: Context) {
     }
 
     /**
-     * 打包某天的数据
+     * 打包记录为 JSON
      */
-    private fun packageDayData(dateStr: String): JSONObject {
-        val records = dataStore.loadRecords()
-        val calendar = Calendar.getInstance()
-
-        // 计算当天的起止时间
-        val dayStart = dateFormat.parse(dateStr)?.time ?: 0
-        val dayEnd = dayStart + 24 * 60 * 60 * 1000L
-
-        // 过滤当天记录
-        val dayRecords = records.filter { record ->
-            record.startTime < dayEnd && (record.endTime ?: System.currentTimeMillis()) > dayStart
-        }
-
+    private fun packageRecords(dateStr: String, records: List<TimeRecord>): JSONObject {
         val recordsArray = JSONArray()
         val summary = mutableMapOf<String, Long>()
 
-        for (record in dayRecords) {
-            // 跨日分摊
-            val effectiveStart = maxOf(record.startTime, dayStart)
-            val effectiveEnd = minOf(record.endTime ?: System.currentTimeMillis(), dayEnd)
-            val effectiveDuration = (effectiveEnd - effectiveStart) / 1000
-
-            if (effectiveDuration <= 0) continue
-
+        for (record in records) {
             val recordObj = JSONObject().apply {
                 put("id", record.id)
                 put("category", record.category)
-                put("startTime", effectiveStart)
-                put("endTime", effectiveEnd)
-                put("durationSeconds", effectiveDuration)
+                put("startTime", record.startTime)
+                put("endTime", if (record.endTime != null) record.endTime else JSONObject.NULL)
+                put("durationSeconds", record.durationSeconds)
                 put("originalInput", record.originalInput)
+                put("createdAt", record.createdAt)
             }
             recordsArray.put(recordObj)
 
-            summary[record.category] = (summary[record.category] ?: 0) + effectiveDuration
+            summary[record.category] = (summary[record.category] ?: 0) + record.durationSeconds
         }
 
         val summaryObj = JSONObject()

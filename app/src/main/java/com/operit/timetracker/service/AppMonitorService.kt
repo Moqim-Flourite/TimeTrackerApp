@@ -629,10 +629,19 @@ class AppMonitorService : Service() {
         }
         
         // 如果当前是空闲任务（熄屏），等 USER_PRESENT 解锁后再处理
+        // 但如果屏幕实际是亮的（服务重启后 USER_PRESENT 已错过），自动恢复
         val currentTask = dataStore.loadCurrentTask()
         if (currentTask != null && currentTask.originalInput == IDLE_PACKAGE) {
-            AppLogger.d("当前为空闲状态，等待用户解锁")
-            return
+            val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            if (pm.isInteractive) {
+                // 屏幕亮着但还在空闲状态 → USER_PRESENT 已错过，自动恢复
+                AppLogger.i("屏幕已亮但仍在空闲状态，自动恢复检测（USER_PRESENT 已错过）")
+                stopCurrentTask(currentTask)
+                // 继续往下执行正常检测流程
+            } else {
+                AppLogger.d("当前为空闲状态，等待用户解锁")
+                return
+            }
         }
         
         // 获取当前前台App
