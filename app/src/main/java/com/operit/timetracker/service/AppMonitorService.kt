@@ -25,9 +25,11 @@ class AppMonitorService : Service() {
         private const val TAG = "AppMonitorService"
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "app_monitor_channel"
+        const val HEARTBEAT_REQUEST_CODE = 9999
+        const val ACTION_HEARTBEAT = "com.operit.timetracker.ACTION_HEARTBEAT"
         private const val CHECK_INTERVAL_MS = 2_000L // 2秒检查一次，更快响应
         private const val NOTIFICATION_UPDATE_MS = 1_000L // 1秒更新通知
-        private const val ALARM_INTERVAL_MS = 60_000L // AlarmManager 60秒心跳
+        const val ALARM_INTERVAL_MS = 60_000L // AlarmManager 60秒心跳（public，供 HeartbeatReceiver 使用）
         private const val WAKELOCK_TIMEOUT_MS = 10 * 60 * 1000L // WakeLock 10分钟超时
         private const val IDLE_PACKAGE = "__SCREEN_OFF__" // 空闲任务标记包名
         
@@ -498,6 +500,13 @@ class AppMonitorService : Service() {
     }
     
     private fun startNotificationUpdater() {
+        // 防重入：先取消旧的通知更新协程
+        notificationUpdateJob?.let {
+            if (it.isActive) {
+                it.cancel()
+            }
+        }
+        
         notificationUpdateJob = serviceScope.launch {
             while (isActive) {
                 try {
@@ -569,6 +578,14 @@ class AppMonitorService : Service() {
     }
     
     private fun startMonitoring() {
+        // 防重入：先取消旧的监控协程，避免多个协程并发读写 state.json
+        monitorJob?.let {
+            if (it.isActive) {
+                AppLogger.w("监控协程已在运行，取消旧的再启动新的")
+                it.cancel()
+            }
+        }
+        
         monitorJob = serviceScope.launch {
             Log.i(TAG, "App监控服务启动")
             AppLogger.i("[WATCHDOG] 监控循环已启动")
@@ -585,11 +602,13 @@ class AppMonitorService : Service() {
                         AppLogger.i("[WATCHDOG] 监控循环运行中: cycle=$monitorLoopCycleCount, last=${lastMonitorLoopTimeMs}")
                     }
                     
-                    // 每 5 分钟续期一次 WakeLock（在超时前续上）
+                    // 每 3 分钟续期一次 WakeLock（在超时前续上，留足够余量）
+                    // 直接在 IO 协程中调用，不绕主线程，避免主线程阻塞导致续期丢失
+                    // HyperOS 可能提前回收 WakeLock，缩短续期间隔提高存活率
                     wakelockRenewCounter++
-                    if (wakelockRenewCounter >= 150) { // 150 * 2s = 300s = 5min
+                    if (wakelockRenewCounter >= 90) { // 90 * 2s = 180s = 3min
                         wakelockRenewCounter = 0
-                        mainHandler.post { renewWakeLock() }
+                        renewWakeLock()
                     }
                     
                     delay(CHECK_INTERVAL_MS)
@@ -702,7 +721,16 @@ class AppMonitorService : Service() {
         } else {
             // 无法获取前台App
             AppLogger.w("无法获取前台App")
-            handleScreenState()
+            
+            // 检查屏幕状态：如果屏幕亮着但获取不到前台App，可能是API被系统过滤
+            // 这种情况下不要切换到空闲状态，等待下一次检测
+            val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            if (pm.isInteractive) {
+                AppLogger.w("屏幕亮着但获取不到前台App，可能是API被HyperOS过滤，等待下次检测")
+            } else {
+                // 屏幕确实灭了，切换到空闲状态
+                handleScreenState()
+            }
         }
         
         // 打印状态文件内容
@@ -733,6 +761,37 @@ class AppMonitorService : Service() {
                 return null
             }
             
+            // 方法1: queryEvents (标准方式)
+            val result = queryForegroundByEvents(beginTime, endTime)
+            if (result != null) {
+                return result
+            }
+            
+            // 方法2: queryUsageStats (降级方案，HyperOS 可能过滤 queryEvents 但不过滤 queryUsageStats)
+            AppLogger.w("queryEvents 返回空，尝试 queryUsageStats 降级方案")
+            val result2 = queryForegroundByUsageStats(beginTime, endTime)
+            if (result2 != null) {
+                return result2
+            }
+            
+            // 方法3: ActivityManager (最后兜底，已废弃但在部分 ROM 上仍然有效)
+            AppLogger.w("queryUsageStats 也返回空，尝试 ActivityManager 兜底")
+            return queryForegroundByActivityManager()
+            
+        } catch (e: SecurityException) {
+            AppLogger.e("SecurityException: ${e.message}")
+            return null
+        } catch (e: Exception) {
+            AppLogger.e("获取前台App失败: ${e.message}", e)
+            return null
+        }
+    }
+    
+    /**
+     * 方法1: 通过 UsageEvents 查询前台 App
+     */
+    private fun queryForegroundByEvents(beginTime: Long, endTime: Long): String? {
+        try {
             val usageEvents = usageStatsManager.queryEvents(beginTime, endTime)
             var currentPackage: String? = null
             var latestEventTime = 0L
@@ -750,7 +809,6 @@ class AppMonitorService : Service() {
                     else -> false
                 }
                 
-                // 记录最近5个事件
                 if (eventCount <= 5) {
                     recentEvents.add("type=${event.eventType}, pkg=${event.packageName}")
                 }
@@ -761,14 +819,78 @@ class AppMonitorService : Service() {
                 }
             }
             
-            AppLogger.i("UsageStats: 共${eventCount}事件, 最近: ${recentEvents.joinToString("; ")}")
-            AppLogger.i("检测结果: 最新前台App=$currentPackage")
+            AppLogger.i("queryEvents: 共${eventCount}事件, 最近: ${recentEvents.joinToString("; ")}")
+            if (currentPackage != null) {
+                AppLogger.i("检测结果: 最新前台App=$currentPackage")
+            }
             return currentPackage
-        } catch (e: SecurityException) {
-            AppLogger.e("SecurityException: ${e.message}")
-            return null
         } catch (e: Exception) {
-            AppLogger.e("获取前台App失败: ${e.message}", e)
+            AppLogger.e("queryEvents 异常: ${e.message}")
+            return null
+        }
+    }
+    
+    /**
+     * 方法2: 通过 queryUsageStats 查询前台 App（降级方案）
+     * HyperOS 可能过滤 queryEvents 但不一定会过滤 queryUsageStats
+     */
+    private fun queryForegroundByUsageStats(beginTime: Long, endTime: Long): String? {
+        try {
+            val usageStatsList = usageStatsManager.queryUsageStats(
+                android.app.usage.UsageStatsManager.INTERVAL_BEST,
+                beginTime,
+                endTime
+            )
+            
+            if (usageStatsList.isNullOrEmpty()) {
+                AppLogger.w("queryUsageStats 返回空列表")
+                return null
+            }
+            
+            // 找到最近有活动的 App
+            var latestPackage: String? = null
+            var latestTime = 0L
+            
+            for (stats in usageStatsList) {
+                if (stats.lastTimeUsed > latestTime) {
+                    latestTime = stats.lastTimeUsed
+                    latestPackage = stats.packageName
+                }
+            }
+            
+            AppLogger.i("queryUsageStats: 共${usageStatsList.size}个App, 最近: $latestPackage")
+            if (latestPackage != null) {
+                AppLogger.i("检测结果: 最新前台App=$latestPackage")
+            }
+            return latestPackage
+        } catch (e: Exception) {
+            AppLogger.e("queryUsageStats 异常: ${e.message}")
+            return null
+        }
+    }
+    
+    /**
+     * 方法3: 通过 ActivityManager 查询前台 App（最后兜底）
+     * 已废弃但在部分 ROM 上仍然有效
+     */
+    @Suppress("DEPRECATION")
+    private fun queryForegroundByActivityManager(): String? {
+        try {
+            val am = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+            val tasks = am.getRunningTasks(1)
+            
+            if (tasks.isNullOrEmpty()) {
+                AppLogger.w("ActivityManager.getRunningTasks 返回空")
+                return null
+            }
+            
+            val topActivity = tasks[0].topActivity
+            val packageName = topActivity?.packageName
+            
+            AppLogger.i("ActivityManager兜底: 最新前台App=$packageName")
+            return packageName
+        } catch (e: Exception) {
+            AppLogger.e("ActivityManager兜底异常: ${e.message}")
             return null
         }
     }
@@ -1001,26 +1123,51 @@ class AppMonitorService : Service() {
     }
     
     // ========== AlarmManager 心跳（兜底保活） ==========
+    // 使用 setExactAndAllowWhileIdle 绕过 Doze 模式
+    // setRepeating 在 Android 12+ 是 inexact 的，HyperOS 会吞掉
+    // setExactAndAllowWhileIdle 不支持 repeating，需要每次触发后重新调度
     
     private fun scheduleAlarmHeartbeat() {
         try {
+            // 先检查精确闹钟权限
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val alarmManager = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+                if (!alarmManager.canScheduleExactAlarms()) {
+                    AppLogger.e("精确闹钟权限未授权！请用户手动开启")
+                    // 可以弹窗引导用户去设置页开启
+                    return
+                }
+            }
+            
+            scheduleExactAlarm()
+            AppLogger.i("AlarmManager 心跳已设置 (setExactAndAllowWhileIdle)")
+        } catch (e: Exception) {
+            AppLogger.e("设置 AlarmManager 失败", e)
+        }
+    }
+    
+    /**
+     * 调度一次精确闹钟，HeartbeatReceiver 触发后会重新调度下一次
+     */
+    fun scheduleExactAlarm() {
+        try {
             val alarmManager = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
-            val intent = Intent(this, com.operit.timetracker.service.HeartbeatReceiver::class.java)
+            val intent = Intent(this, com.operit.timetracker.service.HeartbeatReceiver::class.java).apply {
+                action = ACTION_HEARTBEAT
+            }
             val pendingIntent = PendingIntent.getBroadcast(
-                this, 9999, intent,
+                this, HEARTBEAT_REQUEST_CODE, intent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             
-            // 设置精确闹钟，每 60 秒触发一次
-            alarmManager.setRepeating(
+            val triggerTime = android.os.SystemClock.elapsedRealtime() + ALARM_INTERVAL_MS
+            alarmManager.setExactAndAllowWhileIdle(
                 android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                android.os.SystemClock.elapsedRealtime() + ALARM_INTERVAL_MS,
-                ALARM_INTERVAL_MS,
+                triggerTime,
                 pendingIntent
             )
-            AppLogger.i("AlarmManager 心跳已设置")
         } catch (e: Exception) {
-            AppLogger.e("设置 AlarmManager 失败", e)
+            AppLogger.e("调度精确闹钟失败", e)
         }
     }
     

@@ -5,6 +5,7 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 
@@ -63,6 +64,29 @@ class BootReceiver : BroadcastReceiver() {
     }
     
     private fun scheduleDelayedStart(context: Context) {
+        // 检查精确闹钟权限
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            if (!alarmManager.canScheduleExactAlarms()) {
+                AppLogger.e("BootReceiver: 精确闹钟权限未授权，延迟启动可能失败")
+                // 降级使用不精确闹钟
+                val intent = Intent(context, BootReceiver::class.java).apply {
+                    action = ACTION_DELAYED_START
+                }
+                val pendingIntent = PendingIntent.getBroadcast(
+                    context, REQUEST_CODE_DELAYED_START, intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                alarmManager.setAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    SystemClock.elapsedRealtime() + DELAYED_START_MS,
+                    pendingIntent
+                )
+                Log.w(TAG, "使用不精确闹钟调度延迟启动")
+                return
+            }
+        }
+        
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(context, BootReceiver::class.java).apply {
             action = ACTION_DELAYED_START
@@ -83,6 +107,29 @@ class BootReceiver : BroadcastReceiver() {
     }
     
     private fun scheduleFallbackCheck(context: Context) {
+        // 检查精确闹钟权限
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            if (!alarmManager.canScheduleExactAlarms()) {
+                AppLogger.e("BootReceiver: 精确闹钟权限未授权，兜底检查可能失败")
+                // 降级使用不精确闹钟
+                val intent = Intent(context, BootReceiver::class.java).apply {
+                    action = ACTION_FALLBACK_CHECK
+                }
+                val pendingIntent = PendingIntent.getBroadcast(
+                    context, REQUEST_CODE_FALLBACK, intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                alarmManager.setAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    SystemClock.elapsedRealtime() + FALLBACK_CHECK_MS,
+                    pendingIntent
+                )
+                Log.w(TAG, "使用不精确闹钟调度兜底检查")
+                return
+            }
+        }
+        
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(context, BootReceiver::class.java).apply {
             action = ACTION_FALLBACK_CHECK
