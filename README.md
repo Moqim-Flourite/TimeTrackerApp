@@ -4,6 +4,21 @@
 
 ### 📝 更新日志
 
+#### v1.4.2 (2026-06-18)
+
+**修复（保活）：
+- 🔧 UsageStats 查询三层降级 — queryEvents 被 HyperOS 过滤时自动降级到 queryUsageStats 和 ActivityManager
+- 🔧 AlarmManager 心跳改用 setExactAndAllowWhileIdle — 绕过 Doze 模式，心跳不会被系统吞掉
+- 🔧 HeartbeatReceiver 加 Android 15 前台服务启动检查 — 避免 ForegroundServiceStartNotAllowedException 静默失败
+- 🔧 WorkManager 兜底重启 — 进程被杀后由系统层面调度重启
+- 🔧 BootReceiver 加 canScheduleExactAlarms() 检查 — 精确闹钟权限没了会降级到不精确闹钟
+- 🔧 WakeLock 续期改 3 分钟 — 留更多余量防止 HyperOS 提前回收
+- 🔧 startMonitoring 防重入检查 — 避免多次调用导致监控协程并发竞态条件
+- 🔧 屏幕亮着但 API 返回 null 时不再错误切空闲
+
+**新功能：
+- 🔋 电池优化白名单引导 — 首次打开提示用户添加到电池优化白名单，防止 HyperOS 冻结服务
+
 #### v1.3.0 (2026-06-11)
 
 **新功能：**
