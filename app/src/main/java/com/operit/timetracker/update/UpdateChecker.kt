@@ -206,10 +206,13 @@ class UpdateChecker(private val context: Context) {
         onProgress: (Int) -> Unit
     ): Result<File> = withContext(Dispatchers.IO) {
         try {
-            val dir = File(
-                context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
-                "updates"
-            )
+            val externalDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            val dir = if (externalDir != null) {
+                File(externalDir, "updates")
+            } else {
+                // 外部存储不可用，fallback 到内部存储
+                File(context.filesDir, "updates")
+            }
             if (!dir.exists()) dir.mkdirs()
 
             // 清理旧版本 APK
